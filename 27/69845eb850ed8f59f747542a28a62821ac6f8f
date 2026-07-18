@@ -1,0 +1,21 @@
+packages/js/src/markdown-processor.ts
+  s_31aea4d28c3fa8::t_55d74aca5bb146 7-9,15,19,21-22,25,33,86-88,93-106,392-393,527-532,565,570,572-603,736-744,796-812,823,832
+crates/core/src/convert/output.rs
+  s_31aea4d28c3fa8::t_e39b92c64e6eb2 6-16,194-206,484-510,684-688
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "2769845eb850ed8f59f747542a28a62821ac6f8f",
+  "prompts": {},
+  "sessions": {
+    "s_31aea4d28c3fa8": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08988c376ffeT3Cm0UvjNbezeW",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "bpereira <bpereira@cloudflare.com>"
+    }
+  }
+}
