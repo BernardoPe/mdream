@@ -1,0 +1,25 @@
+crates/core/src/convert/mod.rs
+  s_debe51afdb775a::t_507503cf2e9527 381-389,488
+packages/js/src/tags.ts
+  s_debe51afdb775a::t_c166e1709d2677 120,268-272,276-278,315,390,399-401,422-424,450,456-460,494-505,593,598-602,605,630-634,686-689
+packages/js/src/utils.ts
+  s_debe51afdb775a::t_c6f4f30ad31d15 2,37-99
+packages/mdream/test/unit/nodes/html-to-markdown-parity.test.ts
+  s_debe51afdb775a::t_2959ee1db73228 53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "b424826c9507095c622d7bbd3a627da8d66b2cc3",
+  "prompts": {},
+  "sessions": {
+    "s_debe51afdb775a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0860f7f1affepuO13FANQBRYl4",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "BernardoPe <tgavent3@gmail.com>"
+    }
+  }
+}
