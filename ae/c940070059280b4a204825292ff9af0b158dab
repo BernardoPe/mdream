@@ -1,0 +1,26 @@
+crates/core/src/convert/output.rs
+  s_31aea4d28c3fa8::t_f41ff59a8b124b 7-9,11-16,200,206-208,213,496,499,504,515-516,692-693
+packages/js/src/markdown-processor.ts
+  s_31aea4d28c3fa8::t_80dc1f444d5585 15,18,26,32,38,88-90,95-110,397-398,533-534,568,580,605-608,740,742-744,746-747,803,805-807,829-842
+  s_31aea4d28c3fa8::t_55d74aca5bb146 581-600
+packages/mdream/test/unit/nodes/inline.test.ts
+  s_31aea4d28c3fa8::t_3fcf01f6263030 128-150
+crates/core/src/convert/mod.rs
+  s_31aea4d28c3fa8::t_62a067b25d3a5e 349,465,1032
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "aec940070059280b4a204825292ff9af0b158dab",
+  "prompts": {},
+  "sessions": {
+    "s_31aea4d28c3fa8": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_08988c376ffeT3Cm0UvjNbezeW",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "bpereira <bpereira@cloudflare.com>"
+    }
+  }
+}
