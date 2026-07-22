@@ -1,0 +1,31 @@
+crates/core/src/convert/output.rs
+  s_771c50eb842744::t_84e7de92a772ec 13,978,1250
+crates/core/src/consts.rs
+  s_771c50eb842744::t_551a2264235ac6 113-114,116,141-142,349,422
+crates/core/src/tags.rs
+  s_771c50eb842744::t_89656c4b9d9dc1 128-129
+crates/core/tests/conversion.rs
+  s_771c50eb842744::t_7a1da29233bf0b 363-364
+packages/js/src/const.ts
+  s_771c50eb842744::t_6c471bf8a4e703 112-113,116,146-147
+packages/js/src/markdown-processor.ts
+  s_771c50eb842744::t_c23646906e8ff4 32,35,105-106
+packages/mdream/test/unit/nodes/html-to-markdown-parity.test.ts
+  s_771c50eb842744::t_1163d693cba13b 15-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ea14af76d4606b3f5b3141fda067aafa8d56b4e6",
+  "prompts": {},
+  "sessions": {
+    "s_771c50eb842744": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_075689580ffeUI3gBqIn0l2Rgw",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "BernardoPe <tgavent3@gmail.com>"
+    }
+  }
+}
