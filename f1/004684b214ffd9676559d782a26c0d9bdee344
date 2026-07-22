@@ -1,0 +1,23 @@
+crates/node/test/unit/nodes/html-to-markdown-parity.test.ts
+  s_bcc845f76dea8a::t_7dfd25a3ade243 11
+crates/node/test/unit/nodes/inline.test.ts
+  s_bcc845f76dea8a::t_c226e837503e83 20,26,32
+crates/node/test/unit/streaming/streaming.test.ts
+  s_bcc845f76dea8a::t_b5cfccfff5f6b5 234,239
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "f1004684b214ffd9676559d782a26c0d9bdee344",
+  "prompts": {},
+  "sessions": {
+    "s_bcc845f76dea8a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_075d6c2edffeKnii3UiapNi17W",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "BernardoPe <tgavent3@gmail.com>"
+    }
+  }
+}
