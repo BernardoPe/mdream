@@ -1,0 +1,19 @@
+crates/core/tests/conversion.rs
+  s_771c50eb842744::t_718184c25ed34d 2770-2801
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "cea994aab6bab433b793e54e95bb942a7b60cb89",
+  "prompts": {},
+  "sessions": {
+    "s_771c50eb842744": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_075689580ffeUI3gBqIn0l2Rgw",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "BernardoPe <tgavent3@gmail.com>"
+    }
+  }
+}
