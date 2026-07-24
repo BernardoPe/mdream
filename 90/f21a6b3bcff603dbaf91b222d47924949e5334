@@ -1,0 +1,25 @@
+packages/mdream/test/unit/nodes/blockquote.test.ts
+  s_c86c203aa77f9d::t_15c19866bf429f 112-147
+crates/core/tests/conversion.rs
+  s_c86c203aa77f9d::t_5603e5fec44a61 867-904
+crates/core/src/consts.rs
+  s_c86c203aa77f9d::t_700b763ebddc38 249
+packages/js/src/const.ts
+  s_c86c203aa77f9d::t_c0abe12f777d36 252
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "90f21a6b3bcff603dbaf91b222d47924949e5334",
+  "prompts": {},
+  "sessions": {
+    "s_c86c203aa77f9d": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_06fd14415ffe17wOouCXm4YNav",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "BernardoPe <tgavent3@gmail.com>"
+    }
+  }
+}
