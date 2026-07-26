@@ -46,7 +46,7 @@ describe.each(engines)('pre as fenced code block $name', (engineConfig) => {
     expect(htmlToMarkdown('<pre><code class="language-js`x">~~~\ncode</code></pre>', { engine }))
       .toBe('~~~~js`x\n~~~\ncode\n~~~~')
     expect(htmlToMarkdown('<div><pre class="language-js`x">a\nb\n\n</pre><a href="#x">link</a></div>', { engine }))
-      .toBe('~~~js`x\na\nb\n\n\n~~~\n\n[link](#x)')
+      .toBe('~~~js`x\na\nb\n\n~~~\n\n[link](#x)')
   })
 
   it('leaves the existing <pre><code> behaviour unchanged', async () => {

@@ -46,7 +46,7 @@ import {
 import { finalizeParse, parseHtmlStream } from './parse'
 import { processPluginsForEvent } from './plugin-processor'
 import { breakHandler, renderBreak, resolveUrl } from './tags'
-import { continuationPrefix } from './utils'
+import { continuationPrefix, orderedItemNumber } from './utils'
 
 export interface MarkdownState {
   /** Configuration options for conversion */
@@ -65,6 +65,8 @@ export interface MarkdownState {
   tableRenderedTable?: boolean
   tableCurrentRowCells?: number
   tableColumnAlignments?: string[]
+  /** Columns the delimiter row promised; GFM drops anything past it. */
+  tableHeaderCells?: number
   /** Map of tag names to their current nesting depth */
   depthMap: Uint8Array
   /** Current depth for plugin access */
@@ -97,6 +99,13 @@ export interface MarkdownState {
   blockquotes: BlockquoteFrame[]
   /** Public runtime view used by tag handlers without exposing frame internals. */
   bufferedBlockquoteDepth: number
+  /**
+   * A raw-HTML region (`<details>`, `<dl>`, …) stops being raw at the first
+   * blank line: CommonMark ends an HTML block there and reads what follows as
+   * Markdown, so text after one needs Markdown escaping after all.
+   */
+  rawHtmlMarkdown?: boolean
+  rawHtmlScannedFragments?: number
   /** Whether output should omit Markdown/HTML markup */
   plainText?: boolean
 }
@@ -154,7 +163,9 @@ function updateListIndent(state: MarkdownState, element: ElementNode, eventType:
     return
   if (eventType === NodeEventEnter) {
     const isOrdered = element.parent?.tagId === TAG_OL
-    const width = state.plainText ? 0 : (isOrdered ? String(element.index + 1).length + 2 : 2)
+    // Must match the marker actually written, `start` included, or the
+    // continuation column drifts and nested blocks leave the item.
+    const width = state.plainText ? 0 : (isOrdered ? String(orderedItemNumber(element)).length + 2 : 2)
     state.listIndentWidths.push(width)
     state.listIndent += ' '.repeat(width)
   }
@@ -329,21 +340,76 @@ function escapeRawHtmlText(value: string, depthMap: Uint8Array): string {
  * this position. A non-space byte, or more than three leading spaces, makes
  * the position ordinary inline text.
  */
+// Reused scratch for the line-prefix scan: single-threaded and consumed before
+// the next call, so one buffer avoids an allocation per text node.
+const LINE_PREFIX_SCRATCH = new Uint8Array(32)
+
 function markdownLineIndent(buffer: string[]): number {
-  let spaces = 0
+  let length = 0
   for (let fragmentIndex = buffer.length - 1; fragmentIndex >= 0; fragmentIndex--) {
     const fragment = buffer[fragmentIndex]!
     for (let index = fragment.length - 1; index >= 0; index--) {
       const code = fragment.charCodeAt(index)
       if (code === 10)
-        return spaces <= 3 ? spaces : -1
-      if (code !== 32)
+        return contentColumn(length)
+      // Only spaces and container markers can precede content on this line.
+      if (code !== 32 && code !== 9 && code !== 62 && code !== 45 && code !== 42
+        && code !== 43 && code !== 46 && code !== 41 && !(code >= 48 && code <= 57)) {
         return -1
-      if (++spaces > 3)
+      }
+      if (length === LINE_PREFIX_SCRATCH.length)
         return -1
+      LINE_PREFIX_SCRATCH[length++] = code
     }
   }
-  return spaces <= 3 ? spaces : -1
+  return contentColumn(length)
+}
+
+/**
+ * Indent for the position after a line's list and blockquote markers, or -1
+ * when the line already holds content. A marker resets the count: a block
+ * marker written straight after `- ` or `> ` starts a nested block, so text
+ * there needs the same escaping as text at column zero.
+ *
+ * Reads `LINE_PREFIX_SCRATCH`, which holds the line's bytes in reverse order.
+ */
+function contentColumn(length: number): number {
+  let spaces = 0
+  let index = length - 1
+  while (index >= 0) {
+    const code = LINE_PREFIX_SCRATCH[index]!
+    const next = index > 0 ? LINE_PREFIX_SCRATCH[index - 1]! : -1
+    if (code === 32 || code === 9) {
+      spaces++
+      index--
+    }
+    else if (code === 62) { // >
+      spaces = 0
+      index--
+    }
+    else if ((code === 45 || code === 42 || code === 43) && next === 32) {
+      spaces = 0
+      index -= 2
+    }
+    else if (code >= 48 && code <= 57) {
+      let end = index
+      while (end >= 0 && LINE_PREFIX_SCRATCH[end]! >= 48 && LINE_PREFIX_SCRATCH[end]! <= 57)
+        end--
+      const delimiter = end >= 0 ? LINE_PREFIX_SCRATCH[end]! : -1
+      const after = end > 0 ? LINE_PREFIX_SCRATCH[end - 1]! : -1
+      if ((delimiter === 46 || delimiter === 41) && after === 32) {
+        spaces = 0
+        index = end - 2
+      }
+      else {
+        return -1
+      }
+    }
+    else {
+      return -1
+    }
+  }
+  return spaces > 3 ? 3 : spaces
 }
 
 function isMarkdownMarkerWhitespace(code: number): boolean {
@@ -409,6 +475,36 @@ function isEntityReferenceAfterAmpersand(value: string, ampersand: number): bool
 const GFM_TEXT_NATIVE_TRIGGER = /[\\*_~`[<\r\n]/
 
 /**
+ * Whether `value` at `index` opens a block the way `escapeGfmText` would
+ * escape. Prose starting with a digit ("1945 in film") or a mid-sentence dash
+ * never reaches the slow path.
+ */
+function opensBlockMarker(value: string, index: number): boolean {
+  const code = value.charCodeAt(index)
+  if (code === 62) // >
+    return true
+  if (code === 35) { // #
+    let end = index
+    while (end < value.length && value.charCodeAt(end) === 35)
+      end++
+    return end - index <= 6 && isMarkdownMarkerWhitespace(end < value.length ? value.charCodeAt(end) : 0)
+  }
+  if (code === 45 || code === 43) { // - +
+    return isMarkdownMarkerWhitespace(index + 1 < value.length ? value.charCodeAt(index + 1) : 0)
+      || (code === 45 && isThematicBreak(value, index, 45))
+  }
+  if (code >= 48 && code <= 57) {
+    let end = index
+    while (end < value.length && value.charCodeAt(end) >= 48 && value.charCodeAt(end) <= 57)
+      end++
+    const delimiter = end < value.length ? value.charCodeAt(end) : 0
+    return (delimiter === 46 || delimiter === 41)
+      && isMarkdownMarkerWhitespace(end + 1 < value.length ? value.charCodeAt(end + 1) : 0)
+  }
+  return false
+}
+
+/**
  * Reject ordinary prose through the native string search before entering the
  * precise JavaScript scanner. A block marker can only begin within the first
  * four characters here; later lines are covered by the newline trigger.
@@ -422,24 +518,22 @@ function mayNeedGfmTextEscape(value: string, buffer: string[], depthMap: Uint8Ar
     return true
   }
 
-  let lineIndent = markdownLineIndent(buffer)
-  if (lineIndent < 0)
-    return false
-
+  // Text-side check first: prose that cannot open a block skips the buffer
+  // scan entirely, which is most text nodes.
+  let spaces = 0
   let index = 0
-  while (index < value.length && lineIndent < 3 && value.charCodeAt(index) === 32) {
+  while (index < value.length && spaces < 4 && value.charCodeAt(index) === 32) {
     index++
-    lineIndent++
+    spaces++
   }
   if (index >= value.length)
     return false
 
-  const code = value.charCodeAt(index)
-  return code === 35 // #
-    || code === 43 // +
-    || code === 45 // -
-    || code === 62 // >
-    || (code >= 48 && code <= 57)
+  if (!opensBlockMarker(value, index))
+    return false
+
+  const lineIndent = markdownLineIndent(buffer)
+  return lineIndent >= 0 && lineIndent + spaces <= 3
 }
 
 /**
@@ -883,9 +977,12 @@ function consumeGfmAction(action: GfmAction, state: MarkdownState, lifecycle: Gf
       if (!ownFence)
         return undefined
       const indent = state.listIndent
+      // Content that already ends in a newline would otherwise gain a blank
+      // line before the closing fence.
+      const lead = bufferEndsWithNewline(state) ? '' : '\n'
       const output = (state.depthMap[TAG_LI] || 0) > 0
-        ? `\n${indent}${MARKDOWN_CODE_BLOCK}\n\n${indent}`
-        : `\n${MARKDOWN_CODE_BLOCK}`
+        ? `${lead}${indent}${MARKDOWN_CODE_BLOCK}\n\n${indent}`
+        : `${lead}${MARKDOWN_CODE_BLOCK}`
       const delimiter = finalizeCodeFence(state)
       return delimiter ? output.replace(MARKDOWN_CODE_BLOCK, delimiter) : output
     }
@@ -903,6 +1000,130 @@ function consumeGfmAction(action: GfmAction, state: MarkdownState, lifecycle: Gf
       return delimiter ? action.output.replace(MARKDOWN_CODE_BLOCK, delimiter) : action.output
     }
   }
+}
+
+/**
+ * Note whether the open raw-HTML region has been broken by a blank line. The
+ * scan resumes where the last one stopped, so a region costs one pass in total
+ * no matter how many text nodes it holds.
+ */
+function trackRawHtmlMarkdownContext(state: MarkdownState): void {
+  if (state.rawHtmlMarkdown)
+    return
+  const from = Math.max(0, (state.rawHtmlScannedFragments ?? 0) - 1)
+  for (let index = from; index < state.buffer.length; index++) {
+    const fragment = state.buffer[index]!
+    if (fragment.includes('\n\n')) {
+      state.rawHtmlMarkdown = true
+      break
+    }
+    const next = state.buffer[index + 1]
+    if (next !== undefined && fragment.endsWith('\n') && next.startsWith('\n')) {
+      state.rawHtmlMarkdown = true
+      break
+    }
+  }
+  state.rawHtmlScannedFragments = state.buffer.length
+}
+
+/** Whether the buffer's last non-space character is `#`. */
+function endsWithHash(state: MarkdownState): boolean {
+  for (let fragmentIndex = state.buffer.length - 1; fragmentIndex >= 0; fragmentIndex--) {
+    const fragment = state.buffer[fragmentIndex]!
+    for (let index = fragment.length - 1; index >= 0; index--) {
+      const code = fragment.charCodeAt(index)
+      if (code === 32 || code === 9)
+        continue
+      return code === 35
+    }
+  }
+  return false
+}
+
+/**
+ * The buffer's current line, plus the fragment/offset each position maps back
+ * to, so an edit can be applied without joining the whole buffer.
+ */
+function currentLine(state: MarkdownState): { text: string, starts: number[], first: number } | undefined {
+  const buffer = state.buffer
+  let first = buffer.length - 1
+  const parts: string[] = []
+  while (first >= 0) {
+    const fragment = buffer[first]!
+    parts.push(fragment)
+    if (fragment.includes('\n'))
+      break
+    first--
+  }
+  if (first < 0)
+    first = 0
+  if (parts.length === 0)
+    return undefined
+  parts.reverse()
+  const starts: number[] = []
+  let offset = 0
+  for (const part of parts) {
+    starts.push(offset)
+    offset += part.length
+  }
+  return { text: parts.join(''), starts, first }
+}
+
+/** Insert `insertion` at `position` within the line described by `line`. */
+function insertIntoLine(state: MarkdownState, line: { starts: number[], first: number }, position: number, insertion: string): void {
+  let index = line.starts.length - 1
+  while (index > 0 && line.starts[index]! > position)
+    index--
+  const fragmentIndex = line.first + index
+  const local = position - line.starts[index]!
+  const fragment = state.buffer[fragmentIndex]!
+  state.buffer[fragmentIndex] = `${fragment.slice(0, local)}${insertion}${fragment.slice(local)}`
+  state.lastContentCache = state.buffer[state.buffer.length - 1]
+}
+
+/**
+ * A heading's trailing `#` run is an ATX closing sequence, which GFM strips
+ * along with the text it was meant to be. Escape the run so it survives.
+ */
+function escapeTrailingHeadingHashes(state: MarkdownState): void {
+  const line = currentLine(state)
+  if (!line)
+    return
+  const text = line.text
+  let end = text.length
+  while (end > 0 && (text[end - 1] === ' ' || text[end - 1] === '\t'))
+    end--
+  let start = end
+  while (start > 0 && text[start - 1] === '#')
+    start--
+  if (start === end || start === 0)
+    return
+  const before = text[start - 1]!
+  if (before !== ' ' && before !== '\t')
+    return
+  // Never touch the heading's own opening `#` run.
+  const lineStart = text.lastIndexOf('\n', start - 1) + 1
+  const marker = text.indexOf('#', lineStart)
+  if (marker < 0 || marker >= start)
+    return
+  let contentStart = marker
+  while (contentStart < start && text[contentStart] === '#')
+    contentStart++
+  if (contentStart < start && text[contentStart] === ' ')
+    contentStart++
+  if (start < contentStart)
+    return
+  insertIntoLine(state, line, start, '\\')
+}
+
+function bufferEndsWithNewline(state: MarkdownState): boolean {
+  for (let index = state.buffer.length - 1; index >= 0; index--) {
+    const fragment = state.buffer[index]!
+    if (fragment.length === 0)
+      continue
+    return fragment.charCodeAt(fragment.length - 1) === 10
+  }
+  return false
 }
 
 function commitGfmAction(
@@ -1035,6 +1256,16 @@ export function createMarkdownProcessor(options: EngineOptions = {}, resolvedPlu
       }
 
       const insideRawHtmlBlock = isInsideRawHtmlBlock(state.depthMap)
+      // Text with nothing escapable in it cannot change either way, so the
+      // region scan is skipped for the prose that makes up most nodes.
+      if (insideRawHtmlBlock) {
+        if (mayNeedGfmTextEscape(textNode.value, state.buffer, state.depthMap))
+          trackRawHtmlMarkdownContext(state)
+      }
+      else {
+        state.rawHtmlMarkdown = false
+      }
+
       if (!state.plainText
         && !state.depthMap[TAG_PRE]
         && insideRawHtmlBlock) {
@@ -1047,6 +1278,24 @@ export function createMarkdownProcessor(options: EngineOptions = {}, resolvedPlu
         && !insideRawHtmlBlock
         && mayNeedGfmTextEscape(textNode.value, state.buffer, state.depthMap)) {
         textNode.value = escapeGfmText(textNode.value, state.buffer, state.depthMap)
+      }
+      // Past a blank line the region is Markdown, so raw `<code>` no longer
+      // protects its content and metacharacters need escaping like anywhere
+      // else. A fence still protects its own content.
+      else if (!state.plainText
+        && insideRawHtmlBlock
+        && state.rawHtmlMarkdown
+        && !state.depthMap[TAG_PRE]) {
+        textNode.value = escapeGfmText(textNode.value, state.buffer, state.depthMap)
+      }
+      // A pipe splits the row even inside a code span, so GFM wants it escaped
+      // there too; the backslash is consumed by the table parser, not shown.
+      else if (!state.plainText
+        && state.depthMap[TAG_TABLE]
+        && state.depthMap[TAG_CODE]
+        && !state.depthMap[TAG_PRE]
+        && textNode.value.includes('|')) {
+        textNode.value = textNode.value.replaceAll('|', '\\|')
       }
 
       if (textNode.generatedMarkdown && textNode.value)
@@ -1116,6 +1365,16 @@ export function createMarkdownProcessor(options: EngineOptions = {}, resolvedPlu
 
     const element = node as ElementNode
     const handler = node.tagHandler
+
+    // Only a heading whose text ends in `#` can carry a closing sequence.
+    if (eventType === NodeEventExit
+      && !state.plainText
+      && element.tagId !== undefined
+      && element.tagId >= TAG_H1
+      && element.tagId <= TAG_H6
+      && endsWithHash(state)) {
+      escapeTrailingHeadingHashes(state)
+    }
 
     // The built-in break has zero structural spacing and no exit event. Keep it
     // out of the generic element pipeline, which otherwise scans ancestry and

@@ -492,11 +492,30 @@ impl ConvertState {
   /// enclosing `<table>`). Implements implied end tags for `<tr>` (closes an open
   /// cell + row) and `<thead>`/`<tbody>`/`<tfoot>` (closes cell + row + section).
   fn close_table_context(&mut self, closeable: &[bool; 256]) {
-    while let Some(top) = self.stack.last() {
-      match top.tag_id {
-        Some(id) if closeable[id as usize] => self.close_node(),
-        _ => break,
+    loop {
+      let top = self.stack.last().and_then(|node| node.tag_id);
+      if top.is_some_and(|id| closeable[id as usize]) {
+        self.close_node();
+        continue;
       }
+      // Content left open inside a cell (`<td><p>text` with no `</p>`) sits
+      // above the closeable element and would otherwise stop the scan, leaving
+      // the new row nested inside the old cell.
+      let mut reachable = false;
+      for node in self.stack.iter().rev() {
+        match node.tag_id {
+          Some(id) if closeable[id as usize] => {
+            reachable = true;
+            break;
+          }
+          Some(TAG_TABLE | TAG_TEMPLATE | TAG_CAPTION) | None => break,
+          _ => {}
+        }
+      }
+      if !reachable {
+        break;
+      }
+      self.close_node();
     }
   }
 
@@ -546,7 +565,7 @@ impl ConvertState {
     } else {
       tag_handler.map_or(ATTR_NONE, |h| h.wanted_attrs)
     };
-    let (complete, new_position, attributes, self_closing) =
+    let (complete, new_position, attributes, self_closing, cell_span) =
       process_tag_attributes(html_chunk, position, tag_handler, attr_mask);
 
     if !complete {
@@ -744,12 +763,14 @@ impl ConvertState {
       pooled.excludes_text_nodes = h_excludes;
       pooled.is_non_nesting = h_non_nesting;
       pooled.collapses_inner_white_space = h_collapses;
+      pooled.cell_span = cell_span;
       pooled.spacing = h_spacing;
       pooled
     } else {
       ElementNode {
         custom_name,
         attributes,
+        cell_span,
         tag_id,
         depth: self.depth,
         index: current_walk_index,
@@ -986,7 +1007,14 @@ impl ConvertState {
         let stack_len = self.stack.len();
         let parent_is_ordered = stack_len >= 2 && self.stack[stack_len - 2].tag_id == Some(TAG_OL);
         if parent_is_ordered {
-          let n = li.index + 1;
+          // Must match the marker actually written, `start` included, or the
+          // continuation column drifts and nested blocks leave the item.
+          let start = self.stack[stack_len - 2]
+            .attributes
+            .get("start")
+            .and_then(|value| value.trim_ascii().parse::<u32>().ok())
+            .unwrap_or(1);
+          let n = start.saturating_add(li.index as u32).max(1);
           // n >= 1 so ilog10 never panics; +1 converts floor(log10) to digit count.
           let digits = (n.ilog10() + 1) as usize;
           digits + 2

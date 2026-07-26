@@ -121,7 +121,7 @@ import {
   TAG_XMP,
   TagIdMap,
 } from './const'
-import { continuationPrefix, isEmptyLinkHref } from './utils'
+import { continuationPrefix, isEmptyLinkHref, orderedItemNumber } from './utils'
 
 const TRACKING_PARAM_RE = /^(?:utm_|fbclid|gclid|mc_eid|msclkid|oly_)/
 const URL_SCHEME_RE = /^[\dA-Z+.-]+:/i
@@ -209,6 +209,44 @@ function isAutolinkUri(s: string): boolean {
 }
 
 // Helper function to check if we're inside a table cell
+/** Whether the buffer is at the start of a line, i.e. a row needs its indent. */
+function bufferEndsWithNewlineForRow(state: HandlerContext['state']): boolean {
+  for (let index = state.buffer.length - 1; index >= 0; index--) {
+    const fragment = state.buffer[index]!
+    if (fragment.length === 0)
+      continue
+    return fragment.charCodeAt(fragment.length - 1) === 10
+  }
+  return false
+}
+
+/**
+ * How many table columns a cell occupies. GFM has no `colspan`, so a spanned
+ * cell is written as its content followed by empty cells: without them the
+ * delimiter row is too narrow and GFM drops every cell past it.
+ */
+function cellSpan(node: { attributes?: Record<string, string> }): number {
+  const raw = node.attributes?.colspan
+  if (raw === undefined)
+    return 1
+  const span = Number.parseInt(raw.trim(), 10)
+  if (!Number.isFinite(span) || span < 1)
+    return 1
+  return span > 64 ? 64 : span
+}
+
+/** Empty cells standing in for the columns a `colspan` swallowed. */
+function spanFiller(node: { attributes?: Record<string, string> }): string | undefined {
+  const span = cellSpan(node)
+  return span > 1 ? ' |'.repeat(span - 1) : undefined
+}
+
+/** Whether the cell about to open sits past the promised column count. */
+function cellOverflowsHeader(state: HandlerContext['state']): boolean {
+  const header = state.tableHeaderCells ?? 0
+  return header > 0 && (state.tableCurrentRowCells ?? 0) >= header
+}
+
 function isInsideTableCell(state: HandlerContext['state']): boolean {
   const depthMap = state.depthMap!
   return depthMap[TAG_TD]! > 0 || depthMap[TAG_TH]! > 0
@@ -260,16 +298,32 @@ function getLanguageFromClass(className: string | undefined): string {
   return (langParts && langParts.length > 0) ? langParts[0]!.trim() : ''
 }
 
+/**
+ * Fence language for a `<pre>`/`<code>`: `class="language-x"` first, then
+ * `lang="x"`, the form cmark-gfm itself emits. A `lang` carrying a subtag
+ * (`en-US`, `zh-Hans`) is a human language, never an info string.
+ */
+function fenceLanguage(attributes: Record<string, string> | undefined): string {
+  const fromClass = getLanguageFromClass(attributes?.class)
+  if (fromClass)
+    return fromClass
+  const lang = attributes?.lang?.trim()
+  if (!lang || lang.includes('-') || /\s/.test(lang))
+    return ''
+  return lang
+}
+
 function handleHeading(depth: number): TagHandler {
   return {
     enter: ({ state }) => {
-      if ((state.depthMap?.[TAG_A] || 0) > 0) {
+      // A `#` prefix needs its own line, which a GFM row cannot give it.
+      if ((state.depthMap?.[TAG_A] || 0) > 0 || isInsideTableCell(state)) {
         return `<h${depth}>`
       }
       return `${'#'.repeat(depth)} `
     },
     exit: ({ state }) => {
-      if ((state.depthMap?.[TAG_A] || 0) > 0) {
+      if ((state.depthMap?.[TAG_A] || 0) > 0 || isInsideTableCell(state)) {
         return `</h${depth}>`
       }
     },
@@ -425,7 +479,7 @@ export const tagHandlers: Record<number, TagHandler> = {
       }
       return {
         _tag: 'PreEnter',
-        language: getLanguageFromClass(node.attributes?.class),
+        language: fenceLanguage(node.attributes),
       }
     },
     exit: ({ state }) => {
@@ -448,7 +502,8 @@ export const tagHandlers: Record<number, TagHandler> = {
         if (state.preOwnFence) {
           return undefined
         }
-        const language = getLanguageFromClass(node.attributes?.class)
+        // A `<code>` with no language of its own inherits the `<pre>`'s.
+        const language = fenceLanguage(node.attributes) || state.preFenceLang || ''
         const liDepth = state.depthMap?.[TAG_LI] || 0
         if (liDepth > 0) {
           const indent = state.listIndent
@@ -497,6 +552,8 @@ export const tagHandlers: Record<number, TagHandler> = {
           return undefined
         }
         const liDepth = state.depthMap?.[TAG_LI] || 0
+        // Content that already ends in a newline would otherwise gain a blank
+        // line before the closing fence.
         if (liDepth > 0) {
           const indent = state.listIndent
           return {
@@ -534,7 +591,9 @@ export const tagHandlers: Record<number, TagHandler> = {
       // is pushed onto state.listIndent after the enter output is written
       // (see markdown-processor.ts).
       const isOrdered = node.parent?.tagId === TAG_OL
-      const marker = isOrdered ? `${node.index + 1}. ` : '- '
+      // `<ol start>` carries over to Markdown: GFM numbers from the first
+      // item's marker, so only that one has to be right.
+      const marker = isOrdered ? `${orderedItemNumber(node)}. ` : '- '
       return `${state.listIndent}${marker}`
     },
     exit: ({ state }) => isInsideTableCell(state) ? '</li>' : undefined,
@@ -609,6 +668,7 @@ export const tagHandlers: Record<number, TagHandler> = {
       }
       if ((state.depthMap?.[TAG_TABLE] || 0) <= 1) {
         state.tableRenderedTable = false
+        state.tableHeaderCells = 0
       }
       // Initialize table state
       state.tableColumnAlignments = []
@@ -631,6 +691,8 @@ export const tagHandlers: Record<number, TagHandler> = {
         return '<tr>'
       }
       state.tableCurrentRowCells = 0
+      if ((state.depthMap?.[TAG_LI] || 0) > 0 && state.listIndent && bufferEndsWithNewlineForRow(state))
+        return `${state.listIndent}| `
       return '| '
     },
     exit: ({ state }) => {
@@ -658,7 +720,9 @@ export const tagHandlers: Record<number, TagHandler> = {
           }
         })
 
-        return ` |\n| ${alignmentMarkers.join(' | ')} |`
+        state.tableHeaderCells = alignmentMarkers.length
+        const rowIndent = (state.depthMap?.[TAG_LI] || 0) > 0 ? state.listIndent : ''
+        return ` |\n${rowIndent}| ${alignmentMarkers.join(' | ')} |`
       }
 
       return ' |'
@@ -672,22 +736,30 @@ export const tagHandlers: Record<number, TagHandler> = {
         return '<th>'
       }
 
-      // Handle alignment
+      // A spanned header covers several columns; each needs its own delimiter
+      // entry or the row loses the cells past the span.
       const align = node.attributes?.align?.toLowerCase()
-      if (align) {
-        state.tableColumnAlignments!.push(align)
-      }
-      else if (state.tableColumnAlignments!.length <= state.tableCurrentRowCells!) {
-        state.tableColumnAlignments!.push('')
+      for (let column = 0; column < cellSpan(node); column++) {
+        if (align) {
+          state.tableColumnAlignments!.push(align)
+        }
+        else if (state.tableColumnAlignments!.length <= state.tableCurrentRowCells!) {
+          state.tableColumnAlignments!.push('')
+        }
       }
 
-      return node.index === 0 ? '' : ' | '
+      if (node.index === 0)
+        return ''
+      // GFM discards cells past the delimiter row's width, so fold this one
+      // into the previous cell instead of losing its content.
+      return cellOverflowsHeader(state) ? ' ' : ' | '
     },
-    exit: ({ state }) => {
+    exit: ({ node, state }) => {
       if ((state.depthMap?.[TAG_TABLE] || 0) > 1) {
         return '</th>'
       }
-      state.tableCurrentRowCells!++
+      state.tableCurrentRowCells! += cellSpan(node)
+      return spanFiller(node)
     },
     collapsesInnerWhiteSpace: true,
     spacing: NO_SPACING,
@@ -697,13 +769,16 @@ export const tagHandlers: Record<number, TagHandler> = {
       if ((state.depthMap?.[TAG_TABLE] || 0) > 1) {
         return '<td>'
       }
-      return node.index === 0 ? '' : ' | '
+      if (node.index === 0)
+        return ''
+      return cellOverflowsHeader(state) ? ' ' : ' | '
     },
-    exit: ({ state }) => {
+    exit: ({ node, state }) => {
       if ((state.depthMap?.[TAG_TABLE] || 0) > 1) {
         return '</td>'
       }
-      state.tableCurrentRowCells!++
+      state.tableCurrentRowCells! += cellSpan(node)
+      return spanFiller(node)
     },
     collapsesInnerWhiteSpace: true,
     spacing: NO_SPACING,

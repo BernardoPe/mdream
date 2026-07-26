@@ -39,7 +39,7 @@ describe('gfm text escaping', () => {
 
   it('only escapes syntax where plain text could activate it', () => {
     expect(htmlToMarkdown('<h2># Heading #</h2><p>#hashtag</p><p>Just a - dash</p>'))
-      .toBe('## # Heading #\n\n#hashtag\n\nJust a - dash')
+      .toBe('## # Heading \\#\n\n#hashtag\n\nJust a - dash')
   })
 
   it('escapes syntax introduced by entity decoding', () => {
@@ -98,7 +98,7 @@ describe('gfm text escaping', () => {
     expect(htmlToMarkdown('<pre><code class="language-js`x">~~~\ncode</code></pre>'))
       .toBe('~~~~js`x\n~~~\ncode\n~~~~')
     expect(htmlToMarkdown('<div><pre class="language-js`x">a\nb\n\n</pre><a href="#x">link</a></div>'))
-      .toBe('~~~js`x\na\nb\n\n\n~~~\n\n[link](#x)')
+      .toBe('~~~js`x\na\nb\n\n~~~\n\n[link](#x)')
   })
 
   it('does not double escape parser-protected link and table text', () => {

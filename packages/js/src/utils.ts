@@ -236,3 +236,13 @@ export function traverseUpToFirstBlockNode(node: Node) {
   }
   return parentsToIncrement
 }
+
+/**
+ * The number a list item's marker shows, honouring `<ol start>`.
+ */
+export function orderedItemNumber(node: { index: number, parent?: { attributes?: Record<string, string> } | null }): number {
+  const raw = node.parent?.attributes?.start
+  const start = raw === undefined ? 1 : Number.parseInt(raw.trim(), 10)
+  const base = Number.isFinite(start) && start >= 0 ? start : 1
+  return base + node.index
+}

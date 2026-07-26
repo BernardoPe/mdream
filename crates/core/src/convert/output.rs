@@ -31,6 +31,57 @@ fn write_ascii_escaped(output: &mut String, value: &str, escapes: &[u8; 16]) {
 /// `(`, `)`, and every byte of [`DESTINATION_ESCAPES`] (must stay a superset).
 const DESTINATION_NEEDS_ANGLE: [u8; 16] = [0, 54, 0, 0, 1, 3, 0, 80, 0, 0, 0, 16, 0, 0, 0, 0];
 
+/// Bytes [`ConvertState::escape_gfm_text`] must look at: every escape candidate
+/// plus the ones its line-state machine tracks. Any other byte only clears that
+/// state, so runs of them are skipped whole rather than stepped one at a time.
+const GFM_TEXT_ACTIVE: [bool; 256] = {
+  let mut t = [false; 256];
+  let escapes = b"\\*_~`[]|><#-+.)";
+  let mut i = 0;
+  while i < escapes.len() {
+    t[escapes[i] as usize] = true;
+    i += 1;
+  }
+  t[b'\n' as usize] = true;
+  t[b'\r' as usize] = true;
+  t[b' ' as usize] = true;
+  let mut digit = b'0';
+  while digit <= b'9' {
+    t[digit as usize] = true;
+    digit += 1;
+  }
+  t
+};
+
+/// `" |"` repeated to the widest span [`ConvertState::cell_span`] allows, so a
+/// spanned cell's filler is a slice of this rather than a fresh allocation.
+static SPAN_FILLER: [u8; 128] = {
+  let mut t = [b' '; 128];
+  let mut i = 1;
+  while i < 128 {
+    t[i] = b'|';
+    i += 2;
+  }
+  t
+};
+
+/// Lead bytes that can open a block: the markers themselves plus the space an
+/// indented one may sit behind. See [`ConvertState::opens_block_marker`].
+const GFM_BLOCK_LEAD: [bool; 256] = {
+  let mut t = [false; 256];
+  t[b' ' as usize] = true;
+  t[b'>' as usize] = true;
+  t[b'#' as usize] = true;
+  t[b'-' as usize] = true;
+  t[b'+' as usize] = true;
+  let mut digit = b'0';
+  while digit <= b'9' {
+    t[digit as usize] = true;
+    digit += 1;
+  }
+  t
+};
+
 fn write_markdown_destination(output: &mut String, destination: &str) {
   let bytes = destination.as_bytes();
   let mut index = 0usize;
@@ -73,6 +124,16 @@ fn starts_with_ignore_ascii_case(value: &str, prefix: &[u8]) -> bool {
 }
 
 impl ConvertState {
+  /// `<pre>` content is verbatim, so an inline child there contributes its text
+  /// and nothing else: a `*` or `[` written into a fence renders as itself.
+  /// `<code>` is exempt because it owns the fence, and `<br>` maps to a newline.
+  #[inline]
+  fn suppresses_inline_markup(&self, tag_id: u8) -> bool {
+    self.depth_map[TAG_PRE as usize] > 0
+      && tag_id != TAG_CODE
+      && (tag_id == TAG_A || Self::inline_marker_type(tag_id).is_some())
+  }
+
   #[inline]
   fn inline_marker_type(tag_id: u8) -> Option<u8> {
     // The kind is the delimiter identity: one value per distinct delimiter
@@ -386,8 +447,7 @@ impl ConvertState {
       && self.stack[stack_len - 1].tag_id == Some(TAG_PRE)
       && !self.in_table_cell()
     {
-      let lang = Self::get_language_from_class(self.stack[stack_len - 1].attributes.get("class"))
-        .to_string();
+      let lang = Self::fence_language(&self.stack[stack_len - 1].attributes).to_string();
       self.pre_fence_pending = true;
       self.pre_own_fence = false;
       self.pre_fence_lang = lang;
@@ -428,11 +488,15 @@ impl ConvertState {
         if tag_id == Some(TAG_TABLE) {
           if self.depth_map[TAG_TABLE as usize] <= 1 {
             self.table_rendered_table = false;
+            self.table_header_cells = 0;
           }
           self.table_column_alignments.clear();
         } else if tag_id == Some(TAG_TR) {
           self.table_current_row_cells = 0;
+        } else if tag_id == Some(TAG_TD) {
+          self.open_cell_span = Self::cell_span(node);
         } else if tag_id == Some(TAG_TH) {
+          self.open_cell_span = Self::cell_span(node);
           let align_val = node.attributes.get("align").map_or(0u8, |s| {
             match s.as_bytes().first().copied().unwrap_or(0) | 0x20 {
               b'l' => 1, // left
@@ -441,8 +505,12 @@ impl ConvertState {
               _ => 0,
             }
           });
-          if align_val != 0 || self.table_column_alignments.len() <= self.table_current_row_cells {
-            self.table_column_alignments.push(align_val);
+          // A spanned header covers several columns; each needs its own
+          // delimiter entry or the row loses the cells past the span.
+          for _ in 0..self.open_cell_span.max(1) as usize {
+            if align_val != 0 || self.table_column_alignments.len() <= self.table_current_row_cells {
+              self.table_column_alignments.push(align_val);
+            }
           }
         }
       }
@@ -536,9 +604,11 @@ impl ConvertState {
       });
     }
 
-    if !enter_is_literal && tag_id == Some(TAG_CODE) && !self.in_raw_html_block() {
+    if !enter_is_literal && tag_id == Some(TAG_CODE) {
       if self.depth_map[TAG_PRE as usize] == 0 {
-        if let Some(emitted) = output.as_deref() {
+        if !self.in_raw_html_block()
+          && let Some(emitted) = output.as_deref()
+        {
           self.code_spans.push(CodeSpanState {
             output_start: self.buffer.len() - emitted.len(),
             content_start: self.buffer.len(),
@@ -549,15 +619,19 @@ impl ConvertState {
         && let Some(emitted) = output.as_deref()
       {
         let output_start = self.buffer.len() - emitted.len();
-        let language =
-          Self::get_language_from_class(self.stack[stack_len - 1].attributes.get("class"))
-            .to_string();
+        // The <code> child names the language; when it does not, the enclosing
+        // <pre> may still carry it (issue #97, and `<pre lang=…>`).
+        let mut language = Self::fence_language(&self.stack[stack_len - 1].attributes).to_string();
+        if language.is_empty() {
+          language = std::mem::take(&mut self.pre_fence_lang);
+        }
         self.start_code_fence(
           output_start,
           self.buffer.len(),
           language,
           self.list_indent.clone(),
         );
+        self.pre_fence_open = true;
       }
     }
 
@@ -619,7 +693,11 @@ impl ConvertState {
     }
 
     let tag_id = node.tag_id;
-    let closes_own_pre_fence = tag_id == Some(TAG_PRE) && self.pre_own_fence;
+    let closes_own_pre_fence = tag_id == Some(TAG_PRE) && self.pre_fence_open;
+
+    if tag_id.is_some_and(|id| (TAG_H1..=TAG_H6).contains(&id)) && self.buffer_ends_with_hash() {
+      self.escape_trailing_heading_hashes();
+    }
 
     // Check override
     let override_config = if self.has_tag_overrides {
@@ -640,7 +718,7 @@ impl ConvertState {
     // Table cell count (exit)
     if (tag_id == Some(TAG_TH) || tag_id == Some(TAG_TD)) && self.depth_map[TAG_TABLE as usize] <= 1
     {
-      self.table_current_row_cells += 1;
+      self.table_current_row_cells += self.open_cell_span.max(1) as usize;
     }
 
     let mut output: Option<Cow<'static, str>> = None;
@@ -666,8 +744,12 @@ impl ConvertState {
           let col_count = self
             .table_current_row_cells
             .max(self.table_column_alignments.len());
-          let mut sep = String::with_capacity(col_count * 7 + 5);
-          sep.push_str(" |\n|");
+          let mut sep = String::with_capacity(col_count * 7 + 5 + self.list_indent.len());
+          sep.push_str(" |\n");
+          if self.depth_map[TAG_LI as usize] > 0 {
+            sep.push_str(&self.list_indent);
+          }
+          sep.push('|');
           for i in 0..col_count {
             let align = self.table_column_alignments.get(i).copied().unwrap_or(0);
             sep.push(' ');
@@ -679,6 +761,7 @@ impl ConvertState {
             });
             sep.push_str(" |");
           }
+          self.table_header_cells = col_count;
           table_separator = Some(sep);
         } else {
           output = self.get_exit_output(node);
@@ -826,7 +909,12 @@ impl ConvertState {
     }
 
     // TAG_A exit: write ](url) directly to buffer — zero allocation
-    if !self.plain_text && !has_override && tag_id == Some(TAG_A) && table_separator.is_none() {
+    if !self.plain_text
+      && !has_override
+      && tag_id == Some(TAG_A)
+      && table_separator.is_none()
+      && self.depth_map[TAG_PRE as usize] == 0
+    {
       // Handle whitespace trimming (write_output with None)
       self.write_output(false, is_inline, configured_new_lines, None, false);
       // Write link close directly
@@ -935,8 +1023,7 @@ impl ConvertState {
       output = Some(Cow::Owned(self.finalize_code_span(span)));
     }
     if !has_override
-      && ((tag_id == Some(TAG_CODE) && self.depth_map[TAG_PRE as usize] > 0 && !self.pre_own_fence)
-        || closes_own_pre_fence)
+      && closes_own_pre_fence
       && let Some(delimiter) = self.finalize_code_fence()
       && let Some(exit) = output.as_deref()
     {
@@ -958,8 +1045,17 @@ impl ConvertState {
 
     // Reset <pre> fence deferral once the element closes (issue #97).
     if tag_id == Some(TAG_PRE) {
+      // The closing fence consumed the content's trailing newline. Leaving the
+      // text-whitespace state set lets the next node reach back through the
+      // fence and trim the blank line that separates it, gluing the sibling
+      // onto the fence line.
+      if self.pre_fence_open {
+        self.last_text_node_contains_whitespace = false;
+        self.has_last_text_node = false;
+      }
       self.pre_fence_pending = false;
       self.pre_own_fence = false;
+      self.pre_fence_open = false;
     }
 
     // Record fragment link position for deferred fixup (no String alloc)
@@ -1005,6 +1101,7 @@ impl ConvertState {
       self.pre_fence_lang.clone(),
       self.list_indent.clone(),
     );
+    self.pre_fence_open = true;
     self.last_node_is_inline = false;
   }
 
@@ -1017,9 +1114,9 @@ impl ConvertState {
     depth: usize,
     index: usize,
   ) {
-    let has_inline_gfm_hazard = text.bytes().any(|byte| {
-      (byte > 32 && byte < 0x80 && is_inline_gfm_hazard(byte)) || matches!(byte, b'\n' | b'\r')
-    });
+    let has_inline_gfm_hazard = text
+      .bytes()
+      .any(|byte| NEEDS_GFM_ESCAPE_CHECK[byte as usize]);
     self.text_buffer_has_inline_gfm_hazard |= has_inline_gfm_hazard;
     self.emit_text_with_generated_markdown(text, contains_whitespace, depth, index, None, None);
   }
@@ -1149,6 +1246,16 @@ impl ConvertState {
     };
 
     let inside_raw_html_block = self.in_raw_html_block();
+    // Text with nothing escapable in it cannot change either way, so the
+    // region scan is skipped for the prose that makes up most nodes.
+    if inside_raw_html_block {
+      if has_inline_gfm_hazard || self.starts_with_gfm_block_candidate(text) {
+        self.track_raw_html_markdown_context();
+      }
+    } else {
+      self.raw_html_markdown = false;
+      self.raw_html_scanned_to = self.buffer.len();
+    }
     let raw_html_storage;
     let text = if !self.plain_text && self.depth_map[TAG_PRE as usize] == 0 && inside_raw_html_block
     {
@@ -1158,23 +1265,40 @@ impl ConvertState {
       text
     };
 
-    let has_contextual_escape = self.depth_map[TAG_TABLE as usize] > 0
-      || self.depth_map[TAG_A as usize] > 0
-      || self.depth_map[TAG_BLOCKQUOTE as usize] > 0;
-    let context_has_gfm_hazard = !inside_raw_html_block
-      && has_contextual_escape
-      && text.bytes().any(|byte| {
-        (byte == b'|' && self.depth_map[TAG_TABLE as usize] > 0)
-          || (byte == b']' && self.depth_map[TAG_A as usize] > 0)
-          || (byte == b'>' && self.depth_map[TAG_BLOCKQUOTE as usize] > 0)
-      });
+    // Past a blank line the region is Markdown, so raw `<code>` no longer
+    // protects its content and metacharacters need escaping like anywhere else.
+    // A fence still protects its content, so only text outside one needs this.
+    let raw_html_needs_markdown_escape = inside_raw_html_block
+      && self.raw_html_markdown
+      && !self.plain_text
+      && self.depth_map[TAG_PRE as usize] == 0
+      && !self.line_opens_raw_html_block();
+    let raw_markdown_storage;
+    let text = if raw_html_needs_markdown_escape {
+      raw_markdown_storage = self.escape_gfm_text(text);
+      raw_markdown_storage.as_ref()
+    } else {
+      text
+    };
+
+    // Hoisted so the scan below tests registers instead of reloading
+    // `depth_map` for every byte of every text node.
+    let in_table = self.depth_map[TAG_TABLE as usize] > 0;
+    let in_link = self.depth_map[TAG_A as usize] > 0;
+    let in_quote = self.depth_map[TAG_BLOCKQUOTE as usize] > 0;
+    let context_needs_scan = !inside_raw_html_block && (in_table || in_link || in_quote);
     let escaped_storage;
     let text = if !self.plain_text
       && self.depth_map[TAG_PRE as usize] == 0
       && self.depth_map[TAG_CODE as usize] == 0
       && !inside_raw_html_block
+      // Ordered cheapest-first, and lazily: a text node already known to be
+      // hazardous never pays for the container scan.
       && (has_inline_gfm_hazard
-        || context_has_gfm_hazard
+        || (context_needs_scan
+          && text.bytes().any(|byte| {
+            (byte == b'|' && in_table) || (byte == b']' && in_link) || (byte == b'>' && in_quote)
+          }))
         || self.starts_with_gfm_block_candidate(text))
     {
       #[cfg(test)]
@@ -1182,6 +1306,16 @@ impl ConvertState {
         self.gfm_escape_slow_path_calls += 1;
       }
       escaped_storage = self.escape_gfm_text(text);
+      escaped_storage.as_ref()
+    } else if !self.plain_text
+      && self.depth_map[TAG_TABLE as usize] > 0
+      && self.depth_map[TAG_CODE as usize] > 0
+      && self.depth_map[TAG_PRE as usize] == 0
+      && text.as_bytes().contains(&b'|')
+    {
+      // A pipe splits the row even inside a code span, so GFM wants it escaped
+      // there too; the backslash is consumed by the table parser, not shown.
+      escaped_storage = Cow::Owned(text.replace('|', "\\|"));
       escaped_storage.as_ref()
     } else {
       text
@@ -1240,6 +1374,18 @@ impl ConvertState {
 
     while index < bytes.len() {
       let byte = bytes[index];
+
+      // Prose that can neither be escaped nor feed the line-state machine only
+      // ever clears that state, so the whole run resolves to one update.
+      if !GFM_TEXT_ACTIVE[byte as usize] {
+        index += 1;
+        while index < bytes.len() && !GFM_TEXT_ACTIVE[bytes[index] as usize] {
+          index += 1;
+        }
+        line_indent = None;
+        ordered_digits = 0;
+        continue;
+      }
 
       // A `\&` guarding a decoded entity reference is emitted by the entity
       // decoder; preserve the pair verbatim so this pass never doubles the slash.
@@ -1328,17 +1474,102 @@ impl ConvertState {
 
   #[inline]
   fn starts_with_gfm_block_candidate(&self, text: &str) -> bool {
-    let Some(mut indent) = self.markdown_line_indent() else {
-      return false;
-    };
+    // Text-side check first: prose that cannot open a block skips the buffer
+    // scan entirely, which is most text nodes. The lead byte decides that for
+    // nearly all of them, so neither loop below runs.
+    match text.as_bytes().first() {
+      Some(&lead) if GFM_BLOCK_LEAD[lead as usize] => {}
+      _ => return false,
+    }
+    let mut spaces = 0u8;
+    let mut first = None;
     for byte in text.bytes() {
-      if byte == b' ' && indent < 3 {
-        indent += 1;
+      if byte == b' ' && spaces < 4 {
+        spaces += 1;
         continue;
       }
-      return matches!(byte, b'#' | b'-' | b'+' | b'>' | b'0'..=b'9');
+      first = Some(byte);
+      break;
     }
-    false
+    if !first.is_some_and(|byte| Self::opens_block_marker(byte, &text.as_bytes()[spaces as usize..])) {
+      return false;
+    }
+    self
+      .markdown_line_indent()
+      .is_some_and(|indent| indent + spaces <= 3)
+  }
+
+  /// Whether `rest`, which starts at `byte`, opens a block the way
+  /// [`Self::escape_gfm_text`] would escape. Prose starting with a digit
+  /// ("1945 in film") or a mid-sentence dash never reaches the slow path.
+  #[inline]
+  fn opens_block_marker(byte: u8, rest: &[u8]) -> bool {
+    match byte {
+      b'>' => true,
+      b'#' => {
+        let hashes = rest.iter().take_while(|&&byte| byte == b'#').count();
+        hashes <= 6 && Self::is_markdown_marker_whitespace(rest.get(hashes).copied())
+      }
+      b'-' | b'+' => {
+        Self::is_markdown_marker_whitespace(rest.get(1).copied())
+          || (byte == b'-' && Self::is_thematic_break(rest, byte))
+      }
+      b'0'..=b'9' => {
+        let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+        matches!(rest.get(digits), Some(b'.' | b')'))
+          && Self::is_markdown_marker_whitespace(rest.get(digits + 1).copied())
+      }
+      _ => false,
+    }
+  }
+
+  /// Only a heading whose text ends in `#` can carry a closing sequence.
+  #[inline]
+  fn buffer_ends_with_hash(&self) -> bool {
+    self
+      .buffer
+      .as_bytes()
+      .iter()
+      .rev()
+      .find(|&&byte| byte != b' ' && byte != b'\t')
+      == Some(&b'#')
+  }
+
+  /// A heading's trailing `#` run is an ATX closing sequence, which GFM strips
+  /// along with the text it was meant to be. Escape the run so it survives.
+  fn escape_trailing_heading_hashes(&mut self) {
+    let bytes = self.buffer.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
+      end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && bytes[start - 1] == b'#' {
+      start -= 1;
+    }
+    if start == end || start == 0 || !matches!(bytes[start - 1], b' ' | b'\t') {
+      return;
+    }
+    // Never touch the heading's own opening `#` run.
+    let line_start = bytes[..start]
+      .iter()
+      .rposition(|&byte| byte == b'\n')
+      .map_or(0, |index| index + 1);
+    let Some(marker) = bytes[line_start..start].iter().position(|&byte| byte == b'#') else {
+      return;
+    };
+    let mut content_start = line_start + marker;
+    while content_start < start && bytes[content_start] == b'#' {
+      content_start += 1;
+    }
+    if content_start < start && bytes[content_start] == b' ' {
+      content_start += 1;
+    }
+    if start < content_start {
+      return;
+    }
+    self.buffer.insert(start, '\\');
+    self.last_content_cache_len = 0;
   }
 
   #[inline]
@@ -1390,25 +1621,74 @@ impl ConvertState {
   /// Current leading-space count when a GFM block marker may start here.
   #[inline]
   fn markdown_line_indent(&self) -> Option<u8> {
-    let mut spaces = 0u8;
-    for &byte in self.buffer.as_bytes().iter().rev() {
+    const MAX_PREFIX: usize = 32;
+    let bytes = self.buffer.as_bytes();
+    let mut scanned = 0usize;
+    let mut line_start = None;
+    for (offset, &byte) in bytes.iter().enumerate().rev() {
       if byte == b'\n' {
-        return Some(spaces);
+        line_start = Some(offset + 1);
+        break;
       }
-      if byte != b' ' || spaces == 3 {
+      // Only spaces and container markers can precede content on this line.
+      if !matches!(byte, b' ' | b'\t' | b'>' | b'-' | b'*' | b'+' | b'.' | b')' | b'0'..=b'9') {
         return None;
       }
-      spaces += 1;
-    }
-    if self.buffer.is_empty() && self.has_streamed_output {
-      if self.flushed_tail[1] == b'\n' {
-        Some(0)
-      } else {
-        None
+      scanned += 1;
+      if scanned > MAX_PREFIX {
+        return None;
       }
-    } else {
-      Some(spaces)
     }
+
+    let start = match line_start {
+      Some(start) => start,
+      None => {
+        if self.buffer.is_empty() && self.has_streamed_output && self.flushed_tail[1] != b'\n' {
+          return None;
+        }
+        0
+      }
+    };
+    Self::content_column(&bytes[start..])
+  }
+
+  /// Indent for the position after a line's list and blockquote markers, or
+  /// `None` when the line already holds content. A marker resets the count:
+  /// a block marker written straight after `- ` or `> ` starts a nested block,
+  /// so text there needs the same escaping as text at column zero.
+  fn content_column(prefix: &[u8]) -> Option<u8> {
+    let mut spaces = 0u8;
+    let mut index = 0usize;
+    while index < prefix.len() {
+      match prefix[index] {
+        b' ' | b'\t' => {
+          spaces = spaces.saturating_add(1);
+          index += 1;
+        }
+        b'>' => {
+          spaces = 0;
+          index += 1;
+        }
+        b'-' | b'*' | b'+' if prefix.get(index + 1) == Some(&b' ') => {
+          spaces = 0;
+          index += 2;
+        }
+        b'0'..=b'9' => {
+          let mut end = index;
+          while end < prefix.len() && prefix[end].is_ascii_digit() {
+            end += 1;
+          }
+          if matches!(prefix.get(end), Some(b'.' | b')')) && prefix.get(end + 1) == Some(&b' ') {
+            spaces = 0;
+            index = end + 2;
+          } else {
+            return None;
+          }
+        }
+        _ => return None,
+      }
+    }
+    Some(spaces.min(3))
   }
 
   /// Whether prose at the current position may be hard-wrapped. Code blocks
@@ -1541,6 +1821,105 @@ impl ConvertState {
   }
 
   #[inline]
+  /// Note whether the open raw-HTML region has been broken by a blank line.
+  /// The scan resumes where the last one stopped, so a region costs one pass in
+  /// total no matter how many text nodes it holds.
+  fn track_raw_html_markdown_context(&mut self) {
+    if self.raw_html_markdown {
+      return;
+    }
+    let bytes = self.buffer.as_bytes();
+    let len = bytes.len();
+    // Byte scanning, so a resume point inside a multi-byte character is fine.
+    let from = self.raw_html_scanned_to.min(len).saturating_sub(1);
+    if bytes[from..].windows(2).any(|pair| pair == b"\n\n") {
+      self.raw_html_markdown = true;
+    }
+    self.raw_html_scanned_to = len;
+  }
+
+  /// Whether the current output line opens a raw HTML block. Such a line
+  /// suspends Markdown parsing again until the next blank line, so text on it
+  /// must not be escaped even though an earlier blank line ended the previous
+  /// block.
+  #[inline]
+  fn line_opens_raw_html_block(&mut self) -> bool {
+    let len = self.buffer.len();
+    let bytes = self.buffer.as_bytes();
+    // Only bytes appended since the last call can move the line start; a buffer
+    // that shrank behind the cache (a trim, or a streaming drain) rebuilds it.
+    if self.line_start_scanned_to > len || self.line_start > len {
+      self.line_start = bytes[..len]
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(0, |i| i + 1);
+    } else if let Some(i) = bytes[self.line_start_scanned_to..len]
+      .iter()
+      .rposition(|&byte| byte == b'\n')
+    {
+      self.line_start = self.line_start_scanned_to + i + 1;
+    }
+    self.line_start_scanned_to = len;
+
+    let line = &bytes[self.line_start..len];
+    let indent = line.iter().take(3).take_while(|&&byte| byte == b' ').count();
+    line.get(indent) == Some(&b'<')
+  }
+
+  /// How the current line ends relative to a table row about to be written:
+  /// `(has_content, is_a_row)`. A pending list marker (`- `) is not content —
+  /// the first row of a table in a list item belongs on the marker's line — and
+  /// a line already holding a row only needs a line break, not a block break.
+  fn line_state_before_row(&self) -> (bool, bool) {
+    let bytes = self.buffer.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && bytes[i - 1] != b'\n' {
+      i -= 1;
+    }
+    let line = &bytes[i..];
+    let mut j = 0;
+    while j < line.len() && matches!(line[j], b' ' | b'\t') {
+      j += 1;
+    }
+    if line.get(j) == Some(&b'|') {
+      return (true, true);
+    }
+    (self.line_has_content_before_row(), false)
+  }
+
+  /// Whether the current line already holds content a table row would be
+  /// appended to. A pending list marker (`- `) does not count: the first row of
+  /// a table in a list item belongs on the marker's line.
+  fn line_has_content_before_row(&self) -> bool {
+    let bytes = self.buffer.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && bytes[i - 1] != b'\n' {
+      i -= 1;
+    }
+    let line = &bytes[i..];
+    let mut j = 0;
+    while j < line.len() && matches!(line[j], b' ' | b'\t') {
+      j += 1;
+    }
+    if j < line.len() && matches!(line[j], b'-' | b'*' | b'+') {
+      j += 1;
+    } else {
+      let digits_start = j;
+      while j < line.len() && line[j].is_ascii_digit() {
+        j += 1;
+      }
+      if j > digits_start && j < line.len() && matches!(line[j], b'.' | b')') {
+        j += 1;
+      } else {
+        j = digits_start;
+      }
+    }
+    while j < line.len() && matches!(line[j], b' ' | b'\t') {
+      j += 1;
+    }
+    j < line.len()
+  }
+
   pub(crate) fn in_raw_html_block(&self) -> bool {
     self.depth_map[TAG_DETAILS as usize] > 0
       || self.depth_map[TAG_SUMMARY as usize] > 0
@@ -1666,6 +2045,9 @@ impl ConvertState {
     }
 
     let tag_id = node.tag_id?;
+    if self.suppresses_inline_markup(tag_id) {
+      return Some(Cow::Borrowed(""));
+    }
     match tag_id {
       TAG_DETAILS => Some(Cow::Borrowed("<details>")),
       TAG_SUMMARY => Some(Cow::Borrowed("<summary>")),
@@ -1689,7 +2071,8 @@ impl ConvertState {
       }
       TAG_H1 | TAG_H2 | TAG_H3 | TAG_H4 | TAG_H5 | TAG_H6 => {
         let depth = (tag_id - TAG_H1) as usize;
-        if self.depth_map[TAG_A as usize] > 0 {
+        // A `#` prefix needs its own line, which a GFM row cannot give it.
+        if self.depth_map[TAG_A as usize] > 0 || self.in_table_cell() {
           {
             static H_OPEN: [&str; 6] = ["<h1>", "<h2>", "<h3>", "<h4>", "<h5>", "<h6>"];
             Some(Cow::Borrowed(H_OPEN[depth]))
@@ -1698,7 +2081,25 @@ impl ConvertState {
           Some(Cow::Borrowed(HEADING_PREFIXES[depth]))
         }
       }
-      TAG_HR => Some(Cow::Borrowed(MARKDOWN_HORIZONTAL_RULE)),
+      TAG_HR => {
+        if self.in_table_cell() {
+          // A thematic break cannot live in a GFM row; raw <hr> can.
+          Some(Cow::Borrowed("<hr>"))
+        } else if self.depth_map[TAG_LI as usize] > 0 {
+          // A rule glued to the item's text is read as text. Break the line and
+          // indent to the item's content column so it stays a thematic break.
+          let indent = self.list_indent.as_str();
+          let mut s = String::with_capacity(indent.len() * 2 + 8);
+          s.push_str("\n\n");
+          s.push_str(indent);
+          s.push_str(MARKDOWN_HORIZONTAL_RULE);
+          s.push_str("\n\n");
+          s.push_str(indent);
+          Some(Cow::Owned(s))
+        } else {
+          Some(Cow::Borrowed(MARKDOWN_HORIZONTAL_RULE))
+        }
+      }
       TAG_STRONG | TAG_B => {
         if self.depth_map[TAG_B as usize] > 1 {
           Some(Cow::Borrowed(""))
@@ -1717,6 +2118,20 @@ impl ConvertState {
       TAG_SUB => Some(Cow::Borrowed("<sub>")),
       TAG_SUP => Some(Cow::Borrowed("<sup>")),
       TAG_INS => Some(Cow::Borrowed("<ins>")),
+      // A caption opens its own block like a paragraph, but unlike one it has no
+      // handler to carry the list indent, so left alone it lands at column 0 and
+      // takes its table out of the list item.
+      TAG_CAPTION if self.depth_map[TAG_LI as usize] > 0 && !self.in_table_cell() => {
+        let indent = self.list_indent.as_str();
+        let last_char = self.buffer.as_bytes().last().copied().unwrap_or(0);
+        if last_char == b'\n' {
+          return (!indent.is_empty()).then(|| Cow::Owned(indent.to_string()));
+        }
+        let mut s = String::with_capacity(2 + indent.len());
+        s.push_str("\n\n");
+        s.push_str(indent);
+        Some(Cow::Owned(s))
+      }
       TAG_P => {
         if self.depth_map[TAG_LI as usize] > 0 && !self.in_table_cell() {
           let last_char = self.buffer.as_bytes().last().copied().unwrap_or(0);
@@ -1742,12 +2157,16 @@ impl ConvertState {
           if self.in_table_cell() {
             return Some(Cow::Borrowed("<code>"));
           }
-          // The enclosing <pre> already opened its own fence (mixed
-          // text + <code> children); don't emit a nested fence.
-          if self.pre_own_fence {
+          // A fence is already open for this <pre> — either the <pre> opened it
+          // (mixed text + <code> children) or an earlier <code> sibling did.
+          if self.pre_own_fence || self.pre_fence_open {
             return None;
           }
-          let lang = Self::get_language_from_class(node.attributes.get("class"));
+          // A `<code>` with no language of its own inherits the `<pre>`'s.
+          let lang = match Self::fence_language(&node.attributes) {
+            "" => self.pre_fence_lang.as_str(),
+            own => own,
+          };
           let li_depth = self.depth_map[TAG_LI as usize] as usize;
           if li_depth > 0 {
             let indent = self.list_indent.as_str();
@@ -1820,12 +2239,19 @@ impl ConvertState {
         // the parent's accumulated list_indent — this LI's own marker
         // contribution is pushed onto list_indent AFTER this output
         // is written to the buffer.
-        let is_ordered = _ancestors.last().is_some_and(|p| p.tag_id == Some(TAG_OL));
+        let parent = _ancestors.last().filter(|p| p.tag_id == Some(TAG_OL));
         let mut s = String::with_capacity(self.list_indent.len() + 6);
         s.push_str(&self.list_indent);
-        if is_ordered {
+        if let Some(parent) = parent {
           use std::fmt::Write;
-          let _ = write!(s, "{}. ", node.index + 1);
+          // `<ol start>` carries over to Markdown: GFM numbers from the first
+          // item's marker, so only that one has to be right.
+          let start = parent
+            .attributes
+            .get("start")
+            .and_then(|value| value.trim_ascii().parse::<u32>().ok())
+            .unwrap_or(1);
+          let _ = write!(s, "{}. ", start.saturating_add(node.index as u32));
         } else {
           s.push_str("- ");
         }
@@ -1871,27 +2297,42 @@ impl ConvertState {
       }
       TAG_TR => {
         if self.in_table_cell() {
-          Some(Cow::Borrowed("<tr>"))
+          return Some(Cow::Borrowed("<tr>"));
+        }
+        let indent = if self.depth_map[TAG_LI as usize] > 0 {
+          self.list_indent.as_str()
+        } else {
+          ""
+        };
+        // A row sharing a line with preceding content (a `<caption>`) leaves the
+        // header row as prose, so the delimiter never forms a table. Break to a
+        // new block first, which also restores the list indent.
+        // Rows are the per-cell hot path, so each case that needs no list
+        // indent — every table outside a list — answers with a static string.
+        match self.line_state_before_row() {
+          // Continuing a table (a row left open mid-line): just break the line.
+          (true, true) if indent.is_empty() => return Some(Cow::Borrowed("\n| ")),
+          (true, true) => return Some(Cow::Owned(format!("\n{indent}| "))),
+          (true, false) if indent.is_empty() => return Some(Cow::Borrowed("\n\n| ")),
+          (true, false) => return Some(Cow::Owned(format!("\n\n{indent}| "))),
+          _ => {}
+        }
+        if !indent.is_empty() && self.buffer.as_bytes().last() == Some(&b'\n') {
+          Some(Cow::Owned(format!("{indent}| ")))
         } else {
           Some(Cow::Borrowed("| "))
         }
       }
-      TAG_TH => {
+      TAG_TH | TAG_TD => {
         if self.depth_map[TAG_TABLE as usize] > 1 {
-          return Some(Cow::Borrowed("<th>"));
+          return Some(Cow::Borrowed(if tag_id == TAG_TH { "<th>" } else { "<td>" }));
         }
         if node.index == 0 {
           Some(Cow::Borrowed(""))
-        } else {
-          Some(Cow::Borrowed(" | "))
-        }
-      }
-      TAG_TD => {
-        if self.depth_map[TAG_TABLE as usize] > 1 {
-          return Some(Cow::Borrowed("<td>"));
-        }
-        if node.index == 0 {
-          Some(Cow::Borrowed(""))
+        } else if self.cell_overflows_header() {
+          // GFM discards cells past the delimiter row's width, so fold this
+          // one into the previous cell instead of losing its content.
+          Some(Cow::Borrowed(" "))
         } else {
           Some(Cow::Borrowed(" | "))
         }
@@ -1928,6 +2369,9 @@ impl ConvertState {
     }
 
     let tag_id = node.tag_id?;
+    if self.suppresses_inline_markup(tag_id) {
+      return Some(Cow::Borrowed(""));
+    }
     match tag_id {
       // Inside a table cell the trailing block break would split the GFM row,
       // so emit the raw close tags with no newlines (issue #147).
@@ -1937,7 +2381,7 @@ impl ConvertState {
       TAG_SUMMARY => Some(Cow::Borrowed("</summary>\n\n")),
       TAG_H1 | TAG_H2 | TAG_H3 | TAG_H4 | TAG_H5 | TAG_H6 => {
         let depth = (tag_id - TAG_H1 + 1) as usize;
-        if self.depth_map[TAG_A as usize] > 0 {
+        if self.depth_map[TAG_A as usize] > 0 || self.in_table_cell() {
           {
             static H_CLOSE: [&str; 6] = ["</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>"];
             Some(Cow::Borrowed(H_CLOSE[depth - 1]))
@@ -1970,22 +2414,9 @@ impl ConvertState {
           if self.in_table_cell() {
             return Some(Cow::Borrowed("</code>"));
           }
-          // The enclosing <pre> owns the fence; this <code> opened none.
-          if self.pre_own_fence {
-            return None;
-          }
-          let li_depth = self.depth_map[TAG_LI as usize] as usize;
-          if li_depth > 0 {
-            let indent = self.list_indent.as_str();
-            let mut s = String::with_capacity(1 + indent.len() * 2 + 5);
-            s.push('\n');
-            s.push_str(indent);
-            s.push_str("```\n\n");
-            s.push_str(indent);
-            Some(Cow::Owned(s))
-          } else {
-            Some(Cow::Borrowed("\n```"))
-          }
+          // The <pre> exit closes the fence, so any text following this <code>
+          // stays inside the block rather than landing on the fence line.
+          None
         } else if self.in_raw_html_block() {
           Some(Cow::Borrowed("</code>"))
         } else {
@@ -1998,18 +2429,28 @@ impl ConvertState {
       // when the <pre> opened its own fence; otherwise a <code> child or an
       // empty/whitespace-only <pre> means there is nothing to close.
       TAG_PRE => {
-        if !self.pre_own_fence {
+        if !self.pre_fence_open {
           return None;
         }
+        // A bare <pre> whose content already ends in a newline would otherwise
+        // gain a blank line before the closing fence. A <code> child's fence
+        // always breaks the line itself, so its content keeps whatever trailing
+        // newline it had.
+        let at_line_start =
+          self.pre_own_fence && self.buffer.as_bytes().last() == Some(&b'\n');
         let li_depth = self.depth_map[TAG_LI as usize] as usize;
         if li_depth > 0 {
           let indent = self.list_indent.as_str();
           let mut s = String::with_capacity(1 + indent.len() * 2 + 5);
-          s.push('\n');
+          if !at_line_start {
+            s.push('\n');
+          }
           s.push_str(indent);
           s.push_str("```\n\n");
           s.push_str(indent);
           Some(Cow::Owned(s))
+        } else if at_line_start {
+          Some(Cow::Borrowed("```"))
         } else {
           Some(Cow::Borrowed("\n```"))
         }
@@ -2060,14 +2501,14 @@ impl ConvertState {
         if self.depth_map[TAG_TABLE as usize] > 1 {
           Some(Cow::Borrowed("</th>"))
         } else {
-          None
+          self.span_filler()
         }
       }
       TAG_TD => {
         if self.depth_map[TAG_TABLE as usize] > 1 {
           Some(Cow::Borrowed("</td>"))
         } else {
-          None
+          self.span_filler()
         }
       }
       TAG_CENTER => {
@@ -2100,7 +2541,7 @@ impl ConvertState {
     let tag_id = node.tag_id?;
     match tag_id {
       TAG_BR => Some(Cow::Borrowed("\n")),
-      TAG_P => {
+      TAG_P | TAG_CAPTION => {
         if self.depth_map[TAG_BLOCKQUOTE as usize] > 0
           || (self.depth_map[TAG_LI as usize] > 0 && !self.in_table_cell())
         {
@@ -2409,6 +2850,16 @@ impl ConvertState {
     true
   }
 
+  /// Whether a table would open on a list item's marker line. Starting it there
+  /// leaves a bare `-`, which reads as a setext underline for the text above.
+  #[inline]
+  fn table_opens_on_marker_line(&self, tag_id: u8) -> bool {
+    tag_id == TAG_TABLE
+      && self.depth_map[TAG_LI as usize] > 0
+      && self.buffer.as_bytes().last() != Some(&b'\n')
+      && self.markdown_line_indent().is_some()
+  }
+
   #[inline]
   pub(crate) fn calculate_new_line_config(
     &self,
@@ -2422,16 +2873,32 @@ impl ConvertState {
       return [1, 1];
     }
     if let Some(id) = tag_id {
-      if (id != TAG_LI && self.depth_map[TAG_LI as usize] > 0)
-        || (self.plain_text && id != TAG_BLOCKQUOTE && self.depth_map[TAG_BLOCKQUOTE as usize] > 0)
+      // A table inside a list item still needs one row per line; the rows are
+      // indented to the item's content column so GFM keeps reading a table.
+      let table_in_list = !self.plain_text
+        && (id == TAG_TR || id == TAG_TABLE)
+        && self.depth_map[TAG_TABLE as usize] <= 1
+        && !self.in_table_cell();
+      if table_in_list && self.table_opens_on_marker_line(id) {
+        return [0, 2];
+      }
+      if !table_in_list
+        && ((id != TAG_LI && self.depth_map[TAG_LI as usize] > 0)
+          || (self.plain_text
+            && id != TAG_BLOCKQUOTE
+            && self.depth_map[TAG_BLOCKQUOTE as usize] > 0))
       {
         return NO_SPACING;
       }
     } else if self.depth_map[TAG_LI as usize] > 0 || self.depth_map[TAG_BLOCKQUOTE as usize] > 0 {
       return NO_SPACING;
     }
-    let current_heading_owns_collapse =
-      tag_id.is_some_and(|id| (TAG_H1..=TAG_H6).contains(&id)) && self.collapse_non_span_depth == 1;
+    // A heading normally keeps its blank lines even where the parent collapses
+    // whitespace, but in a table cell those newlines would end the row.
+    let current_heading_owns_collapse = tag_id
+      .is_some_and(|id| (TAG_H1..=TAG_H6).contains(&id))
+      && self.collapse_non_span_depth == 1
+      && !self.in_table_cell();
     if self.collapse_non_span_depth > 0 && !current_heading_owns_collapse {
       return NO_SPACING;
     }
@@ -2462,6 +2929,35 @@ impl ConvertState {
     node_spacing.unwrap_or(DEFAULT_BLOCK_SPACING)
   }
 
+  /// Empty cells standing in for the columns a `colspan` swallowed.
+  #[inline]
+  pub(crate) fn span_filler(&self) -> Option<Cow<'static, str>> {
+    match self.open_cell_span {
+      0 | 1 => None,
+      // `cell_span` clamps to 64, so the filler is always a slice of the table
+      // above rather than a string built per spanned cell.
+      span => Some(Cow::Borrowed(
+        std::str::from_utf8(&SPAN_FILLER[..(span as usize - 1) * 2]).unwrap_or(" |"),
+      )),
+    }
+  }
+
+  /// Whether the cell about to open sits past the promised column count.
+  #[inline]
+  fn cell_overflows_header(&self) -> bool {
+    self.table_header_cells > 0 && self.table_current_row_cells >= self.table_header_cells
+  }
+
+  /// How many table columns a cell occupies. GFM has no `colspan`, so a spanned
+  /// cell is written as its content followed by empty cells: without them the
+  /// delimiter row is too narrow and GFM drops every cell past it.
+  #[inline]
+  pub(crate) fn cell_span(node: &ElementNode) -> u8 {
+    // Parsed during the tag scan (0 when the cell carried no `colspan`), so this
+    // is a field read rather than an attribute lookup per cell.
+    node.cell_span.clamp(1, 64)
+  }
+
   #[inline]
   pub(crate) fn get_language_from_class(class_name: Option<&String>) -> &str {
     if let Some(class) = class_name {
@@ -2472,6 +2968,28 @@ impl ConvertState {
       }
     }
     ""
+  }
+
+  /// Fence language for a `<pre>`/`<code>`: `class="language-x"` first, then
+  /// `lang="x"`, the form cmark-gfm itself emits. A `lang` carrying a subtag
+  /// (`en-US`, `zh-Hans`) is a human language, never an info string.
+  #[inline]
+  pub(crate) fn fence_language(attributes: &crate::types::Attributes) -> &str {
+    let from_class = Self::get_language_from_class(attributes.get("class"));
+    if !from_class.is_empty() {
+      return from_class;
+    }
+    match attributes.get("lang") {
+      Some(lang) => {
+        let lang = lang.trim();
+        if lang.is_empty() || lang.contains('-') || lang.contains(char::is_whitespace) {
+          ""
+        } else {
+          lang
+        }
+      }
+      None => "",
+    }
   }
 }
 

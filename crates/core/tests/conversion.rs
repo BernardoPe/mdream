@@ -231,7 +231,7 @@ fn gfm_syntax_in_text_is_escaped() {
 fn gfm_text_escaping_preserves_generated_markers_and_code() {
   assert_eq!(
     convert("<h2># Heading #</h2><p>#hashtag</p><p>Just a - dash</p>"),
-    "## # Heading #\n\n#hashtag\n\nJust a - dash"
+    "## # Heading \\#\n\n#hashtag\n\nJust a - dash"
   );
   assert_eq!(
     convert(
@@ -577,7 +577,7 @@ b
 
 </pre><a href="#x">link</a></div>"##
     ),
-    "~~~js`x\na\nb\n\n\n~~~\n\n[link](#x)"
+    "~~~js`x\na\nb\n\n~~~\n\n[link](#x)"
   );
 }
 
@@ -775,7 +775,7 @@ fn block_code_fence_is_held_until_its_delimiter_is_known() {
 fn pre_with_trailing_blank_lines_closes_fence_before_inline_sibling() {
   assert_eq!(
     convert("<div><pre>a\nb\n\n</pre><a href=\"#x\">link</a></div>"),
-    "```\na\nb\n\n\n```\n\n[link](#x)"
+    "```\na\nb\n\n```\n\n[link](#x)"
   );
 }
 
@@ -797,7 +797,7 @@ fn block_pre_does_not_glue_closing_fence_to_inline_link() {
 fn pre_with_trailing_blank_lines_separates_following_text() {
   assert_eq!(
     convert("<div><pre>a\nb\n\n</pre>after</div>"),
-    "```\na\nb\n\n\n```\n\nafter"
+    "```\na\nb\n\n```\n\nafter"
   );
 }
 
@@ -1847,18 +1847,94 @@ fn blockquote_content_start_survives_a_trailing_space_trim() {
 }
 
 #[test]
+fn a_caption_does_not_share_a_line_with_the_header_row() {
+  // Regression: the caption left the buffer mid-line, so the header row was
+  // appended to it — prose, then a delimiter row that never formed a table.
+  let md = html_to_markdown(
+    "<ul><li><p>Intro:</p><table><caption>Cap</caption>\
+     <thead><tr><th>h</th></tr></thead><tbody><tr><td>c</td></tr></tbody></table></li></ul>",
+    HTMLToMarkdownOptions::default(),
+  );
+  // The caption carries the list indent too, so it and the table stay in the item.
+  assert!(md.contains("\n  Cap\n\n  | h |\n  | --- |"), "got: {md:?}");
+
+  // A row continuing one left open mid-line breaks the line without opening a
+  // new block, which would split the table.
+  let md = html_to_markdown(
+    "<table><tr><td>a</td></tr><tr><td>b</td></tr></table>",
+    HTMLToMarkdownOptions::default(),
+  );
+  assert!(!md.contains("\n\n"), "got: {md:?}");
+}
+
+#[test]
+fn list_item_code_fence_closes_at_the_content_column() {
+  // Regression: a closing fence at column 0 ends the list item, so cmark reads
+  // it as a new opener and the rest of the document becomes code.
+  let md = html_to_markdown(
+    "<ul><li><p>one</p><pre><code>code\n</code></pre><p>after</p></li></ul>",
+    HTMLToMarkdownOptions::default(),
+  );
+  assert!(md.contains("\n  ```\n\n  after"), "got: {md:?}");
+
+  // A bare <pre> ends on a newline, and that trailing whitespace used to let the
+  // next block reach back through the fence and trim its separator, leaving
+  // ``` after on one line.
+  let md = html_to_markdown(
+    "<ul><li><pre>code\n</pre><p>after</p></li></ul>",
+    HTMLToMarkdownOptions::default(),
+  );
+  assert!(md.contains("\n  ```\n\n  after"), "got: {md:?}");
+}
+
+#[test]
+fn raw_html_block_reopens_after_a_blank_line() {
+  // Regression: once a blank line ended one HTML block the region stayed
+  // "Markdown", so a later <dt> line — which opens a fresh HTML block — had its
+  // text escaped and the backslash rendered literally.
+  let md = html_to_markdown(
+    "<dl><dt><code>A_B</code></dt><dd><p>one</p></dd>\
+     <dt><code>C_D</code></dt><dd><p>two</p></dd></dl>",
+    HTMLToMarkdownOptions::default(),
+  );
+  assert!(md.contains("<code>C_D</code>"), "got: {md:?}");
+  assert!(!md.contains("C\\_D"), "got: {md:?}");
+}
+
+#[test]
+fn pre_keeps_text_after_a_code_child_inside_the_fence() {
+  // Regression: the <code> exit closed the fence, so a trailing sibling landed
+  // on the fence line as ``` <text> — an opener that never closes, swallowing
+  // the rest of the document.
+  let md = html_to_markdown(
+    "<pre><code>compopt</code> [-o option]</pre><p>after</p>",
+    HTMLToMarkdownOptions::default(),
+  );
+  assert_eq!(md, "```\ncompopt [-o option]\n```\n\nafter", "got: {md:?}");
+
+  // Several <code> children share the one fence the <pre> closes.
+  let md = html_to_markdown(
+    "<pre><code>a</code><code>b</code></pre>",
+    HTMLToMarkdownOptions::default(),
+  );
+  assert_eq!(md, "```\nab\n```", "got: {md:?}");
+}
+
+#[test]
 fn pre_fence_opener_survives_a_trailing_space_trim() {
   // Regression: the same reach-back against a code fence eats the opener's
   // trailing newline, leaving `content_start` past the buffer end and
   // finalizing panicking.
   let md = html_to_markdown("# h<pre><td></pre>", HTMLToMarkdownOptions::default());
-  assert_eq!(md, "\\# h\n\n```\n\n```", "got: {md:?}");
+  assert_eq!(md, "\\# h\n\n```\n```", "got: {md:?}");
 
+  // The <pre> closes a <code> child's fence, so the block keeps the opener's
+  // trailing newline as its (empty) body.
   let md = html_to_markdown(
     "# h<pre><code><td></code></pre>",
     HTMLToMarkdownOptions::default(),
   );
-  assert_eq!(md, "\\# h\n\n```\n```", "got: {md:?}");
+  assert_eq!(md, "\\# h\n\n```\n\n```", "got: {md:?}");
 
   // Every block-marker escape (`#`, `-`, `>`) can precede the fence.
   for html in [
@@ -3358,4 +3434,207 @@ fn wrap_nested_list_in_blockquote_keeps_structure() {
       "list continuation left the blockquote: {line:?}"
     );
   }
+}
+
+// ── GFM compliance: output a real GFM parser reads back the way it was meant ──
+
+#[test]
+fn block_markers_are_escaped_after_a_list_marker() {
+  for (html, expected) in [
+    ("<ul><li>- text</li></ul>", "- \\- text"),
+    ("<ul><li>+ text</li></ul>", "- \\+ text"),
+    ("<ul><li># text</li></ul>", "- \\# text"),
+    ("<ul><li>&gt; text</li></ul>", "- \\> text"),
+    ("<ul><li>1. text</li></ul>", "- 1\\. text"),
+    // A bare rule would end the list entirely.
+    ("<ul><li>---</li></ul>", "- \\---"),
+  ] {
+    assert_eq!(convert(html), expected, "html={html:?}");
+  }
+
+  // Continuation indent past three columns still counts as a line start.
+  assert_eq!(
+    convert("<ul><li>a<ul><li>b<ul><li>&gt; quote</li></ul></li></ul></li></ul>"),
+    "- a\n  - b\n    - \\> quote"
+  );
+}
+
+#[test]
+fn heading_keeps_a_trailing_hash() {
+  for (html, expected) in [
+    ("<h2>Ends with #</h2>", "## Ends with \\#"),
+    ("<h2>Ends with ###</h2>", "## Ends with \\###"),
+    ("<h3>#</h3>", "### \\#"),
+    ("<h2>Ends <em>with</em> #</h2>", "## Ends *with* \\#"),
+    // No preceding space means no closing sequence, so no escape.
+    ("<h2>C#</h2>", "## C#"),
+    ("<h2>Mid # hash</h2>", "## Mid # hash"),
+  ] {
+    assert_eq!(convert(html), expected, "html={html:?}");
+  }
+}
+
+#[test]
+fn a_pipe_inside_a_table_code_span_is_escaped() {
+  assert_eq!(
+    convert("<table><tr><th>h</th></tr><tr><td><code>a|b</code></td></tr></table>"),
+    "| h |\n| --- |\n| `a\\|b` |"
+  );
+  // Outside a table the pipe is ordinary code content.
+  assert_eq!(convert("<p><code>a|b</code></p>"), "`a|b`");
+}
+
+#[test]
+fn pre_content_carries_no_inline_markup() {
+  assert_eq!(
+    convert("<pre>a <em>b</em> <strong>c</strong>\n</pre>"),
+    "```\na b c\n```"
+  );
+  assert_eq!(
+    convert("<pre>a <a href=\"/x\">l</a>\n</pre>"),
+    "```\na l\n```"
+  );
+  // Outside a fence both still render as markup.
+  assert_eq!(
+    convert("<p>a <em>b</em> <a href=\"/x\">l</a></p>"),
+    "a *b* [l](/x)"
+  );
+}
+
+#[test]
+fn a_fence_does_not_gain_a_blank_line_before_its_close() {
+  assert_eq!(convert("<pre>a\nb\n</pre>"), "```\na\nb\n```");
+  assert_eq!(
+    convert("<pre><code>a\nb\n</code></pre>"),
+    "```\na\nb\n```"
+  );
+}
+
+#[test]
+fn fence_language_falls_back_to_the_lang_attribute() {
+  assert_eq!(
+    convert("<pre lang=\"rust\"><code>let x = 1;\n</code></pre>"),
+    "```rust\nlet x = 1;\n```"
+  );
+  assert_eq!(
+    convert("<pre class=\"language-js\"><code>x\n</code></pre>"),
+    "```js\nx\n```"
+  );
+  // A class on the <code> wins over the <pre>'s lang.
+  assert_eq!(
+    convert("<pre lang=\"rust\"><code class=\"language-py\">x\n</code></pre>"),
+    "```py\nx\n```"
+  );
+  // A human language tag is not an info string.
+  assert_eq!(convert("<pre lang=\"en-US\">x\n</pre>"), "```\nx\n```");
+}
+
+#[test]
+fn ordered_lists_honour_the_start_attribute() {
+  assert_eq!(
+    convert("<ol start=\"3\"><li>a</li><li>b</li></ol>"),
+    "3. a\n4. b"
+  );
+  assert_eq!(convert("<ol start=\"0\"><li>a</li></ol>"), "0. a");
+  assert_eq!(
+    convert("<ol><li>a</li><li>b</li></ol>"),
+    "1. a\n2. b"
+  );
+}
+
+#[test]
+fn a_rule_inside_a_list_item_keeps_its_own_line() {
+  assert_eq!(convert("<ul><li>a<hr></li></ul>"), "- a\n\n  ---");
+  // A GFM row cannot hold a thematic break, so raw <hr> goes in the cell.
+  assert_eq!(
+    convert("<table><tr><th>h</th></tr><tr><td>a<hr>b</td></tr></table>"),
+    "| h |\n| --- |\n| a<hr>b |"
+  );
+}
+
+#[test]
+fn a_heading_in_a_table_cell_stays_in_the_row() {
+  assert_eq!(
+    convert("<table><tr><th>h</th></tr><tr><td><h3>H</h3></td></tr></table>"),
+    "| h |\n| --- |\n| <h3>H</h3> |"
+  );
+  assert_eq!(convert("<h3>H</h3><p>after</p>"), "### H\n\nafter");
+}
+
+#[test]
+fn a_table_inside_a_list_item_stays_a_table() {
+  assert_eq!(
+    convert("<ul><li><table><tr><th>h</th></tr><tr><td>c</td></tr></table></li></ul>"),
+    "- | h |\n  | --- |\n  | c |"
+  );
+  assert_eq!(
+    convert("<ol><li><table><tr><th>h</th></tr><tr><td>c</td></tr></table></li></ol>"),
+    "1. | h |\n   | --- |\n   | c |"
+  );
+  // Text before the table needs the blank line, or the header row would be a
+  // lazy continuation of the paragraph.
+  assert_eq!(
+    convert("<ul><li>text<table><tr><th>h</th></tr><tr><td>c</td></tr></table></li></ul>"),
+    "- text\n\n  | h |\n  | --- |\n  | c |"
+  );
+}
+
+#[test]
+fn colspan_widens_the_delimiter_row() {
+  assert_eq!(
+    convert("<table><tr><td colspan=\"2\">wide</td></tr><tr><td>a</td><td>b</td></tr></table>"),
+    "| wide | |\n| --- | --- |\n| a | b |"
+  );
+  assert_eq!(
+    convert("<table><tr><th align=\"center\" colspan=\"2\">h</th></tr><tr><td>1</td><td>2</td></tr></table>"),
+    "| h | |\n| :---: | :---: |\n| 1 | 2 |"
+  );
+}
+
+#[test]
+fn cells_past_the_delimiter_row_merge_instead_of_vanishing() {
+  assert_eq!(
+    convert("<table><tr><th>h</th></tr><tr><td>a</td><td>b</td><td>c</td></tr></table>"),
+    "| h |\n| --- |\n| a b c |"
+  );
+}
+
+#[test]
+fn a_row_closes_through_content_left_open_in_a_cell() {
+  assert_eq!(
+    convert("<table><thead><tr><th>V<th>C<tbody><tr><td>a<td><p>x<tr><td>b<td><p>y</table>"),
+    "| V | C |\n| --- | --- |\n| a | x |\n| b | y |"
+  );
+}
+
+#[test]
+fn raw_html_regions_escape_markdown_past_a_blank_line() {
+  // The blank line after </summary> ends the HTML block, so what follows is
+  // parsed as Markdown and its metacharacters have to be escaped.
+  for (html, needle) in [
+    ("<details><summary>S</summary><p>* text</p></details>", "\\* text"),
+    ("<details><summary>S</summary><p># text</p></details>", "\\# text"),
+    ("<details><summary>S</summary><p>[x](y)</p></details>", "\\[x](y)"),
+  ] {
+    let md = convert(html);
+    assert!(md.contains(needle), "html={html:?} md={md:?}");
+  }
+
+  // With no blank line the region is still raw HTML, so nothing is escaped.
+  assert_eq!(
+    convert("<dl><dt><code>__proto__</code></dt><dd>x</dd></dl>"),
+    "<dl><dt><code>__proto__</code></dt>\n<dd>x</dd>\n</dl>"
+  );
+}
+
+#[test]
+fn element_node_stays_within_its_padding() {
+  // `cell_span` was added to the small-field group; a growth here means it
+  // spilled into a new word, which past measurements showed costs more than the
+  // attribute lookup it replaces.
+  assert!(
+    std::mem::size_of::<mdream::types::ElementNode>() <= 104,
+    "ElementNode grew to {} bytes",
+    std::mem::size_of::<mdream::types::ElementNode>()
+  );
 }

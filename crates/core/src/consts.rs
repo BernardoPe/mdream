@@ -251,6 +251,9 @@ pub const ATTR_ALIGN: u16 = 1 << 6;
 pub const ATTR_NAME: u16 = 1 << 7;
 pub const ATTR_PROPERTY: u16 = 1 << 8;
 pub const ATTR_CONTENT: u16 = 1 << 9;
+pub const ATTR_LANG: u16 = 1 << 10;
+pub const ATTR_START: u16 = 1 << 11;
+pub const ATTR_COLSPAN: u16 = 1 << 12;
 pub const ATTR_ALL: u16 = u16::MAX;
 
 /// Case-insensitive, length-first so the common miss costs one compare.
@@ -271,6 +274,8 @@ pub(crate) fn attr_bit(name: &[u8]) -> u16 {
         ATTR_HREF
       } else if name.eq_ignore_ascii_case(b"name") {
         ATTR_NAME
+      } else if name.eq_ignore_ascii_case(b"lang") {
+        ATTR_LANG
       } else {
         ATTR_NONE
       }
@@ -282,6 +287,8 @@ pub(crate) fn attr_bit(name: &[u8]) -> u16 {
         ATTR_CLASS
       } else if name.eq_ignore_ascii_case(b"align") {
         ATTR_ALIGN
+      } else if name.eq_ignore_ascii_case(b"start") {
+        ATTR_START
       } else {
         ATTR_NONE
       }
@@ -289,6 +296,8 @@ pub(crate) fn attr_bit(name: &[u8]) -> u16 {
     7 => {
       if name.eq_ignore_ascii_case(b"content") {
         ATTR_CONTENT
+      } else if name.eq_ignore_ascii_case(b"colspan") {
+        ATTR_COLSPAN
       } else {
         ATTR_NONE
       }
@@ -309,11 +318,6 @@ pub(crate) fn attr_bit(name: &[u8]) -> u16 {
     }
     _ => ATTR_NONE,
   }
-}
-
-#[inline]
-pub(crate) fn attr_wanted(mask: u16, name: &[u8]) -> bool {
-  mask == ATTR_ALL || mask & attr_bit(name) != 0
 }
 
 pub const MARKDOWN_STRONG: &str = "**";

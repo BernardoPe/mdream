@@ -52,6 +52,26 @@ const BATCHABLE_TEXT: [bool; 256] = {
   t
 };
 
+/// Whether a byte forces the escaping slow path: inline GFM markup, or a line
+/// break that can put the text at a block boundary. Checked once per text-node
+/// byte, so it is a table rather than the range-guarded bitmap arithmetic.
+pub(crate) const NEEDS_GFM_ESCAPE_CHECK: [bool; 256] = {
+  let mut t = [false; 256];
+  let mut c = 33usize;
+  while c < 0x80 {
+    let mask = if c < HAZARD_MASK_SPLIT as usize {
+      GFM_HAZARD_LOW
+    } else {
+      GFM_HAZARD_HIGH
+    };
+    t[c] = (mask >> (c & (HAZARD_MASK_SPLIT as usize - 1))) & 1 != 0;
+    c += 1;
+  }
+  t[NEWLINE_CHAR as usize] = true;
+  t[CARRIAGE_RETURN_CHAR as usize] = true;
+  t
+};
+
 /// Callers must range-guard: bytes >= 128 alias into `GFM_HAZARD_HIGH`.
 #[inline(always)]
 fn is_inline_gfm_hazard(byte: u8) -> bool {
@@ -344,6 +364,10 @@ pub struct ConvertState {
   last_content_cache_len: usize,
   table_rendered_table: bool,
   table_current_row_cells: usize,
+  /// Columns the delimiter row promised; GFM drops anything past it.
+  table_header_cells: usize,
+  /// `colspan` of the cell currently open, read once on enter.
+  open_cell_span: u8,
   // 0=none, 1=left, 2=center, 3=right
   table_column_alignments: Vec<u8>,
   last_text_node_contains_whitespace: bool,
@@ -423,7 +447,22 @@ pub struct ConvertState {
   /// must not, and the `<pre>` exit emits the closing fence).
   pre_fence_pending: bool,
   pre_fence_lang: String,
+  /// A raw-HTML region (`<details>`, `<dl>`, …) stops being raw at the first
+  /// blank line: CommonMark ends an HTML block there and reads what follows as
+  /// Markdown, so text after one needs Markdown escaping after all.
+  raw_html_markdown: bool,
+  raw_html_scanned_to: usize,
+  /// Cache for [`ConvertState::line_opens_raw_html_block`]: the index just past
+  /// the buffer's last `\n`, and how far the buffer was scanned to find it.
+  /// Recomputing it walks the whole line, so without the resume point a raw-HTML
+  /// region built as one long line costs O(n²) over its text nodes.
+  line_start: usize,
+  line_start_scanned_to: usize,
   pre_own_fence: bool,
+  /// A fence is open for the current `<pre>`, whichever element emitted it.
+  /// The `<pre>` exit owns the closer so trailing siblings of a `<code>` child
+  /// stay inside the block instead of landing on the fence line.
+  pre_fence_open: bool,
   #[cfg(test)]
   gfm_escape_slow_path_calls: usize,
 }
@@ -494,6 +533,8 @@ impl ConvertState {
       last_content_cache_len: 0,
       table_rendered_table: false,
       table_current_row_cells: 0,
+      table_header_cells: 0,
+      open_cell_span: 1,
       table_column_alignments: Vec::new(),
       last_text_node_contains_whitespace: false,
       last_text_node_depth: 0,
@@ -528,7 +569,12 @@ impl ConvertState {
 
       pre_fence_pending: false,
       pre_fence_lang: String::new(),
+      raw_html_markdown: false,
+      raw_html_scanned_to: 0,
+      line_start: 0,
+      line_start_scanned_to: 0,
       pre_own_fence: false,
+      pre_fence_open: false,
       #[cfg(test)]
       gfm_escape_slow_path_calls: 0,
     };

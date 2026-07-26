@@ -43,7 +43,7 @@ describe('inline whitespace', () => {
 describe('block element followed by inline sibling (#148)', () => {
   it('closes a trailing-blank <pre> fence before an inline link', () => {
     expect(htmlToMarkdown('<div><pre>a\nb\n\n</pre><a href="#x">link</a></div>'))
-      .toBe('```\na\nb\n\n\n```\n\n[link](#x)')
+      .toBe('```\na\nb\n\n```\n\n[link](#x)')
   })
 
   it('does not glue the closing fence to a pilcrow link (xml2rfc case)', () => {
@@ -53,7 +53,7 @@ describe('block element followed by inline sibling (#148)', () => {
 
   it('separates a trailing-blank <pre> from following text', () => {
     expect(htmlToMarkdown('<div><pre>a\nb\n\n</pre>after</div>'))
-      .toBe('```\na\nb\n\n\n```\n\nafter')
+      .toBe('```\na\nb\n\n```\n\nafter')
   })
 
   it('matches across every streaming chunk boundary', async () => {

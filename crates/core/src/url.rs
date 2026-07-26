@@ -13,10 +13,14 @@ const TRACKING_PREFIXES: [&str; 6] = ["utm_", "fbclid", "gclid", "mc_eid", "mscl
 /// no whitespace or angle brackets that would break the autolink syntax.
 #[inline]
 pub(crate) fn is_autolink_uri(s: &str) -> bool {
-  let has_scheme = s.starts_with("http://")
-    || s.starts_with("https://")
-    || s.starts_with("ftp://")
-    || s.starts_with("mailto:");
+  // Every supported scheme starts with h, f or m, so relative hrefs — most of
+  // them — reject on one byte instead of four prefix comparisons.
+  let has_scheme = match s.as_bytes().first() {
+    Some(b'h') => s.starts_with("http://") || s.starts_with("https://"),
+    Some(b'f') => s.starts_with("ftp://"),
+    Some(b'm') => s.starts_with("mailto:"),
+    _ => false,
+  };
   if !has_scheme {
     return false;
   }

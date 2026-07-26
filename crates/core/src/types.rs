@@ -88,6 +88,10 @@ pub struct ElementNode {
   pub excludes_text_nodes: bool,
   pub is_non_nesting: bool,
   pub collapses_inner_white_space: bool,
+  /// `colspan` for a table cell, parsed during the tag scan. Kept as a scalar
+  /// rather than read back from `attributes` so a cell never allocates the two
+  /// strings a map entry costs. 0 when the tag carried none.
+  pub cell_span: u8,
   pub spacing: Option<[u8; 2]>,
 }
 

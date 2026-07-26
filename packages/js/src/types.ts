@@ -288,6 +288,8 @@ export interface MdreamRuntimeState extends Partial<MdreamProcessingState> {
   /** Table processing state - specialized for Markdown tables */
   tableRenderedTable?: boolean
   tableCurrentRowCells?: number
+  /** Columns the delimiter row promised; GFM drops anything past it. */
+  tableHeaderCells?: number
   tableColumnAlignments?: string[]
 
   /** Resolved plugin instances for efficient iteration */
