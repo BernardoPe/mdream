@@ -1,0 +1,19 @@
+crates/core/src/convert/output.rs
+  s_c45ea9df450b47::t_2251dcbee803a0 1840-1853
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "0aa06b0527713393bd83c92a4fcfb915b1ab7790",
+  "prompts": {},
+  "sessions": {
+    "s_c45ea9df450b47": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04e8a4bfaffejC6R50f6PUD7HD",
+        "model": "claude-opus-5"
+      },
+      "human_author": "BernardoPe <tgavent3@gmail.com>"
+    }
+  }
+}
