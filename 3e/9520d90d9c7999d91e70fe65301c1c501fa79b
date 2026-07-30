@@ -1,0 +1,37 @@
+crates/core/src/convert/mod.rs
+  s_c45ea9df450b47::t_192bf143547deb 155-158,1364-1375,1506-1516
+crates/core/src/convert/parse.rs
+  s_c45ea9df450b47::t_e66e4270acb5d8 670-674
+crates/core/src/scan.rs
+  s_c45ea9df450b47::t_63802ad6559b81 526-549
+crates/core/tests/conversion.rs
+  s_c45ea9df450b47::t_56f766cf9a15ee 3699-3723,3739-3741
+crates/core/tests/implied_end_tags.rs
+  s_c45ea9df450b47::t_557f2b39a92058 103-139
+crates/core/tests/streaming_drain.rs
+  s_c45ea9df450b47::t_b27787e08e6d1a 849-884
+packages/js/src/markdown-processor.ts
+  s_c45ea9df450b47::t_7dcc97a32f328b 346-354,365,1264-1266,1269-1271,1834-1849,1866
+packages/js/src/parse.ts
+  s_c45ea9df450b47::t_fef3bd08c32435 247-250,380-393,396-398,400-401
+packages/js/src/utils.ts
+  s_c45ea9df450b47::t_f2fca3f9f91c56 193-194,285-291,297-298
+packages/mdream/test/unit/fixture-parity.test.ts
+  s_c45ea9df450b47::t_3e36e1bf7f163f 626-641
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "3e9520d90d9c7999d91e70fe65301c1c501fa79b",
+  "prompts": {},
+  "sessions": {
+    "s_c45ea9df450b47": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04e8a4bfaffejC6R50f6PUD7HD",
+        "model": "claude-opus-5"
+      },
+      "human_author": "BernardoPe <tgavent3@gmail.com>"
+    }
+  }
+}
