@@ -1,0 +1,24 @@
+packages/js/src/parse.ts
+  s_c45ea9df450b47::t_fef3bd08c32435 400
+packages/js/src/utils.ts
+  s_c45ea9df450b47::t_f2fca3f9f91c56 330
+  s_c45ea9df450b47::t_edfcbc3a20f312 327-329
+crates/core/src/convert/output.rs
+  s_c45ea9df450b47::t_2251dcbee803a0 1837-1850
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "53ed731ff6d57440130d4aae8aa114e870155e48",
+  "prompts": {},
+  "sessions": {
+    "s_c45ea9df450b47": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_04e8a4bfaffejC6R50f6PUD7HD",
+        "model": "claude-opus-5"
+      },
+      "human_author": "BernardoPe <tgavent3@gmail.com>"
+    }
+  }
+}
