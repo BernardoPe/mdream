@@ -1,0 +1,35 @@
+crates/core/src/url.rs
+  s_50d45ac3d4c7e5::t_136b34f98ff2f9 221-227,249-251,471-502
+crates/core/tests/conversion.rs
+  s_59dca9de8e64ac::t_02a63c89f60814 402-416
+packages/js/src/tags.ts
+  s_50d45ac3d4c7e5::t_699a1ba4b28ebc 144-155,168
+packages/mdream/test/unit/nodes/image.test.ts
+  s_59dca9de8e64ac::t_84105d8d96f9d7 44-50
+packages/mdream/test/unit/nodes/links.test.ts
+  s_50d45ac3d4c7e5::t_dcf7d0c584c8f0 98-127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "d2795be63c40b2cc054c1d4898957c43a5d68f56",
+  "prompts": {},
+  "sessions": {
+    "s_50d45ac3d4c7e5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_03a44d37dffeLFgl1v0ET83dF0",
+        "model": "@cf/moonshotai/kimi-k2.7-code"
+      },
+      "human_author": "BernardoPe <tgavent3@gmail.com>"
+    },
+    "s_59dca9de8e64ac": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_03a28fc61ffe6s8oFHwf5wfWq5",
+        "model": "@cf/moonshotai/kimi-k2.7-code"
+      },
+      "human_author": "BernardoPe <tgavent3@gmail.com>"
+    }
+  }
+}
