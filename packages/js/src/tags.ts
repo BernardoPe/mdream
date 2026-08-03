@@ -141,6 +141,18 @@ function stripTrackingParams(url: string): string {
   return `${url.slice(0, queryStart)}${query ? `?${query}` : ''}${url.slice(queryEnd)}`
 }
 
+function originRoot(origin: string): string {
+  const schemeEnd = origin.indexOf('://')
+  if (schemeEnd !== -1) {
+    const hostStart = schemeEnd + 3
+    const pathStart = origin.indexOf('/', hostStart)
+    if (pathStart !== -1) {
+      return origin.slice(0, pathStart)
+    }
+  }
+  return origin
+}
+
 export function resolveUrl(url: string, origin?: string, clean?: EngineOptions['clean']): string {
   if (!url || url[0] === '#')
     return url
@@ -153,7 +165,7 @@ export function resolveUrl(url: string, origin?: string, clean?: EngineOptions['
     const path = url.startsWith('./') ? url.slice(2) : url
     while (origin.endsWith('/'))
       origin = origin.slice(0, -1)
-    resolved = `${origin}${path[0] === '/' ? '' : '/'}${path}`
+    resolved = path[0] === '/' ? `${originRoot(origin)}${path}` : `${origin}/${path}`
   }
 
   const cleansUrls = clean === true || (!!clean && clean.urls === true)

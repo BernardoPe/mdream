@@ -218,6 +218,13 @@ pub(crate) fn slugify_heading(text: &str) -> String {
   slug
 }
 
+fn origin_root(origin: &str) -> &str {
+  origin
+    .find("://")
+    .and_then(|i| origin[i + 3..].find('/').map(|j| &origin[..i + 3 + j]))
+    .unwrap_or(origin)
+}
+
 #[inline]
 pub(crate) fn resolve_url<'a>(url: &'a str, origin: Option<&str>, clean: bool) -> Cow<'a, str> {
   if url.is_empty() || url.starts_with('#') {
@@ -239,8 +246,9 @@ pub(crate) fn resolve_url<'a>(url: &'a str, origin: Option<&str>, clean: bool) -
   if let Some(orig) = origin {
     let orig = orig.trim_end_matches('/');
     if url.starts_with('/') {
-      let mut resolved = String::with_capacity(orig.len() + url.len());
-      resolved.push_str(orig);
+      let root = origin_root(orig);
+      let mut resolved = String::with_capacity(root.len() + url.len());
+      resolved.push_str(root);
       resolved.push_str(url);
       return Cow::Owned(if needs_clean {
         strip_tracking_params_owned(resolved)
@@ -457,6 +465,38 @@ mod tests {
     assert_eq!(
       resolve_url("page", Some("https://x.com"), false),
       "https://x.com/page",
+    );
+  }
+
+  #[test]
+  fn resolve_url_root_absolute_with_pathed_origin() {
+    assert_eq!(
+      resolve_url("/about", Some("https://example.com/faq/"), false),
+      "https://example.com/about",
+    );
+    assert_eq!(
+      resolve_url("/x/y", Some("https://example.com/a/b/c/page.html"), false),
+      "https://example.com/x/y",
+    );
+    assert_eq!(
+      resolve_url("/images/logo.jpg", Some("https://example.com/faq/"), false),
+      "https://example.com/images/logo.jpg",
+    );
+    assert_eq!(
+      resolve_url("/about", Some("https://example.com:8080/faq/"), false),
+      "https://example.com:8080/about",
+    );
+  }
+
+  #[test]
+  fn resolve_url_relative_with_pathed_origin() {
+    assert_eq!(
+      resolve_url("./about", Some("https://example.com/faq/"), false),
+      "https://example.com/faq/about",
+    );
+    assert_eq!(
+      resolve_url("page", Some("https://example.com/faq/"), false),
+      "https://example.com/faq/page",
     );
   }
 

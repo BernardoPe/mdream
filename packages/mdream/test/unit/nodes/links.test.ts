@@ -95,6 +95,36 @@ describe.each(engines)('links $name', (engineConfig) => {
     expect(markdown).toBe('[Link](https://example.com/page#section)')
   })
 
+  it('handles root-absolute path with pathed origin', async () => {
+    const engine = await resolveEngine(engineConfig.engine)
+    const html = '<a href="/about">Link</a>'
+    const markdown = htmlToMarkdown(html, {
+      origin: 'https://example.com/faq/',
+      engine,
+    })
+    expect(markdown).toBe('[Link](https://example.com/about)')
+  })
+
+  it('handles root-absolute path with pathed origin and fragment', async () => {
+    const engine = await resolveEngine(engineConfig.engine)
+    const html = '<a href="/page#section">Link</a>'
+    const markdown = htmlToMarkdown(html, {
+      origin: 'https://example.com/blog/',
+      engine,
+    })
+    expect(markdown).toBe('[Link](https://example.com/page#section)')
+  })
+
+  it('handles root-absolute path with pathed origin and port', async () => {
+    const engine = await resolveEngine(engineConfig.engine)
+    const html = '<a href="/about">Link</a>'
+    const markdown = htmlToMarkdown(html, {
+      origin: 'https://example.com:8080/faq/',
+      engine,
+    })
+    expect(markdown).toBe('[Link](https://example.com:8080/about)')
+  })
+
   it('handles relative path with fragment without origin', async () => {
     const engine = await resolveEngine(engineConfig.engine)
     const html = '<a href="/page#section">Link</a>'

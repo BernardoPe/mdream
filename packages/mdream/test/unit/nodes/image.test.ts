@@ -41,6 +41,13 @@ describe.each(engines)('image url resolving $name', (engineConfig) => {
     expect(markdown).toBe('![Icon](https://example.com/images/icon.png)')
   })
 
+  it('should handle root-absolute paths with pathed origin', async () => {
+    const engine = await resolveEngine(engineConfig.engine)
+    const html = '<img src="/images/logo.svg" alt="Logo">'
+    const markdown = htmlToMarkdown(html, { origin: 'https://example.com/faq/', engine })
+    expect(markdown).toBe('![Logo](https://example.com/images/logo.svg)')
+  })
+
   it('handles images in complex HTML', async () => {
     const engine = await resolveEngine(engineConfig.engine)
     const html = `

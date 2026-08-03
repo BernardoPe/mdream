@@ -400,6 +400,21 @@ fn relative_path_with_origin() {
 }
 
 #[test]
+fn root_absolute_path_with_pathed_origin() {
+  assert_eq!(
+    convert_with_origin(r#"<a href="/about">Link</a>"#, "https://example.com/faq/"),
+    "[Link](https://example.com/about)"
+  );
+  assert_eq!(
+    convert_with_origin(
+      r#"<a href="/page#section">Link</a>"#,
+      "https://example.com/blog/"
+    ),
+    "[Link](https://example.com/page#section)"
+  );
+}
+
+#[test]
 fn relative_path_without_origin() {
   assert_eq!(
     convert(r#"<a href="/page#section">Link</a>"#),
