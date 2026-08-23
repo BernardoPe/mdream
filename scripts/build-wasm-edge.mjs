@@ -3,10 +3,13 @@
  * Every consumer (CI tests, release, bundle-size bench) must build through
  * this script so the shipped artifact matches the measured one.
  *
- * Pipeline: wasm-pack (release, opt-level=s)
+ * Pipeline: wasm-pack (release, opt-level=3)
  *        -> wasm-opt -O3 --converge --low-memory-unused
- * opt-level=s measured 20% smaller than the default opt-level=3 at a 3-7%
- * throughput cost; opt-level=z was 29% slower on large documents.
+ * opt-level=3 measured +13.2% (default options) / +10.4% (with plugins and
+ * clean flags on) throughput over opt-level=s, mean across an eight-fixture
+ * sweep with per-fixture range -3.5% to +25.9%, for +8.7 KB gzip (85,163 to
+ * 93,872 B; raw +22.4%, brotli +7.1%). opt-level=z was 29% slower than
+ * opt-level=3 on large documents.
  *
  * On the wasm-opt side the win comes from --converge. Benchmark this flag set
  * on arm64, which the perf gate uses: it is worth 4.3% there and only ~1.4% on
@@ -40,7 +43,7 @@ const cargoArgs = features ? ['--', '--features', features] : []
 execFileSync('wasm-pack', ['build', '--target', target, '--out-dir', outDir, '--out-name', outName, ...cargoArgs], {
   cwd: edgeDir,
   stdio: 'inherit',
-  env: { ...process.env, CARGO_PROFILE_RELEASE_OPT_LEVEL: 's' },
+  env: { ...process.env, CARGO_PROFILE_RELEASE_OPT_LEVEL: '3' },
 })
 
 const OPT_FLAGS = ['-O3', '--converge', '--low-memory-unused']
