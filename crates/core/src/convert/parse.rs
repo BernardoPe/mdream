@@ -1088,44 +1088,30 @@ impl ConvertState {
       h_inline = is_inline;
     }
 
-    let mut tag = if let Some(mut pooled) = self.node_pool.pop() {
-      pooled.extras = extras;
-      // Swap, not assign: assigning drops the pooled node's kept buffer.
-      std::mem::swap(&mut pooled.attributes, &mut self.attr_scratch);
-      pooled.tag_id = tag_id;
-      pooled.depth = self.depth;
-      pooled.index = current_walk_index;
-      pooled.current_walk_index = 0;
-      pooled.child_text_node_index = 0;
-      pooled.contains_whitespace = false;
-      pooled.excluded_from_markdown = false;
-      pooled.enter_skipped = false;
-      pooled.is_inline = h_inline;
-      pooled.excludes_text_nodes = h_excludes;
-      pooled.is_non_nesting = h_non_nesting;
-      pooled.collapses_inner_white_space = h_collapses;
-      pooled.spacing = h_spacing;
-      pooled
-    } else {
-      ElementNode {
-        extras,
-        // Pool empty, so no buffer to trade back; the scratch regrows once.
-        attributes: std::mem::take(&mut self.attr_scratch),
-        tag_id,
-        depth: self.depth,
-        index: current_walk_index,
-        current_walk_index: 0,
-        child_text_node_index: 0,
-        contains_whitespace: false,
-        excluded_from_markdown: false,
-        enter_skipped: false,
-        is_inline: h_inline,
-        excludes_text_nodes: h_excludes,
-        is_non_nesting: h_non_nesting,
-        collapses_inner_white_space: h_collapses,
-        spacing: h_spacing,
-      }
-    };
+    // Filled in place: a built-then-moved node stalls store forwarding.
+    let parent = self.stack.len().checked_sub(1);
+    let idx = self.stack.len();
+    let parent_hidden = self.has_plugins
+      && self.has_tailwind
+      && parent
+        .and_then(|p| self.stack[p].tailwind())
+        .is_some_and(|tw| tw.hidden);
+    let tag = self.stack.push_slot();
+    std::mem::swap(&mut tag.attributes, &mut self.attr_scratch);
+    tag.extras = extras;
+    tag.tag_id = tag_id;
+    tag.depth = self.depth;
+    tag.index = current_walk_index;
+    tag.current_walk_index = 0;
+    tag.child_text_node_index = 0;
+    tag.contains_whitespace = false;
+    tag.excluded_from_markdown = false;
+    tag.enter_skipped = false;
+    tag.is_inline = h_inline;
+    tag.excludes_text_nodes = h_excludes;
+    tag.is_non_nesting = h_non_nesting;
+    tag.collapses_inner_white_space = h_collapses;
+    tag.spacing = h_spacing;
 
     let mut skip_node = false;
     let mut filter_excluded = false;
@@ -1133,12 +1119,6 @@ impl ConvertState {
 
     if self.has_plugins {
       if self.has_tailwind {
-        let parent_hidden = self
-          .stack
-          .last()
-          .and_then(ElementNode::tailwind)
-          .is_some_and(|tw| tw.hidden);
-
         if let Some(class_attr) = tag.attributes.get_bit(ATTR_CLASS) {
           let (mut prefix, mut suffix, hidden) = process_tailwind_classes(class_attr);
           if plain_text!(self) {
@@ -1173,11 +1153,11 @@ impl ConvertState {
         if self.hidden_since_depth.is_some() {
           skip_node = true;
           filter_excluded = true;
-        } else if is_hidden(&tag)
+        } else if is_hidden(tag)
           || self
             .filter_exclude_parsed
             .iter()
-            .any(|(_, parsed)| matches_selector_list(&tag, parsed))
+            .any(|(_, parsed)| matches_selector_list(tag, parsed))
         {
           skip_node = true;
           filter_excluded = true;
@@ -1192,7 +1172,7 @@ impl ConvertState {
             && self
               .filter_include_parsed
               .iter()
-              .any(|(_, parsed)| matches_selector_list(&tag, parsed))
+              .any(|(_, parsed)| matches_selector_list(tag, parsed))
           {
             match_found = true;
             if self.filter_included_since_depth.is_none() {
@@ -1294,12 +1274,7 @@ impl ConvertState {
       }
     }
 
-    if let Some(last) = self.stack.last_mut() {
-      last.current_walk_index += 1;
-    }
-
     if !tag.is_inline {
-      let idx = self.stack.len();
       self.first_block_parent_index = Some(idx);
       self.block_parent_indices.push(idx);
     }
@@ -1312,7 +1287,10 @@ impl ConvertState {
           .and_then(|value| super::output::parse_bounded_u32(value, MAX_ORDERED_START)),
       );
     }
-    self.stack.push(tag);
+
+    if let Some(p) = parent {
+      self.stack[p].current_walk_index += 1;
+    }
 
     // Extraction
     if !self.extraction_parsed_selectors.is_empty()
@@ -1421,13 +1399,33 @@ impl ConvertState {
 
     let popping_index = self.stack.len() - 1;
     // Guard already checked above, but avoid panic on edge cases
-    let Some(node) = self.stack.pop() else { return };
+    if !self.stack.retire() {
+      return;
+    }
+    let (
+      node_depth,
+      node_tag_id,
+      node_collapses,
+      node_excluded,
+      node_enter_skipped,
+      node_child_text_index,
+    ) = {
+      let node = self.stack.retired();
+      (
+        node.depth,
+        node.tag_id,
+        node.collapses_inner_white_space,
+        node.excluded_from_markdown,
+        node.enter_skipped,
+        node.child_text_node_index,
+      )
+    };
 
     // Each marker holds the shallowest open match, so only its own close clears it.
-    if self.hidden_since_depth == Some(node.depth) {
+    if self.hidden_since_depth == Some(node_depth) {
       self.hidden_since_depth = None;
     }
-    if self.filter_included_since_depth == Some(node.depth) {
+    if self.filter_included_since_depth == Some(node_depth) {
       self.filter_included_since_depth = None;
     }
 
@@ -1440,8 +1438,8 @@ impl ConvertState {
         .or(if self.stack.is_empty() { None } else { Some(0) });
     }
 
-    if node.collapses_inner_white_space && !node.excluded_from_markdown {
-      if node.tag_id == Some(TAG_SPAN) {
+    if node_collapses && !node_excluded {
+      if node_tag_id == Some(TAG_SPAN) {
         self.collapse_span_depth = self.collapse_span_depth.saturating_sub(1);
       } else {
         self.collapse_non_span_depth = self.collapse_non_span_depth.saturating_sub(1);
@@ -1449,8 +1447,8 @@ impl ConvertState {
     }
 
     if self.has_isolate_main
-      && node.tag_id == Some(TAG_MAIN)
-      && !node.excluded_from_markdown
+      && node_tag_id == Some(TAG_MAIN)
+      && !node_excluded
       && self.isolate_main_found
       && !self.isolate_main_closed
     {
@@ -1459,8 +1457,8 @@ impl ConvertState {
 
     // Frontmatter generation on HEAD close
     if self.has_frontmatter
-      && node.tag_id == Some(TAG_HEAD)
-      && !node.excluded_from_markdown
+      && node_tag_id == Some(TAG_HEAD)
+      && !node_excluded
       && self.frontmatter_in_head
     {
       self.frontmatter_in_head = false;
@@ -1468,27 +1466,27 @@ impl ConvertState {
     }
 
     // Special: empty links — synthesize text from title/aria-label
-    if node.tag_id == Some(TAG_A)
-      && node.child_text_node_index == 0
-      && !node.excluded_from_markdown
-      && !node.enter_skipped
+    if node_tag_id == Some(TAG_A)
+      && node_child_text_index == 0
+      && !node_excluded
+      && !node_enter_skipped
     {
-      let prefix = node
+      let prefix = self
+        .stack
+        .retired()
         .attributes
         .get_bit(ATTR_TITLE)
-        .or_else(|| node.attributes.get_bit(ATTR_ARIA_LABEL))
+        .or_else(|| self.stack.retired().attributes.get_bit(ATTR_ARIA_LABEL))
         .map(ToString::to_string)
         .unwrap_or_default();
       if !prefix.is_empty() {
-        let node_depth = node.depth;
-        let node_tag_id = node.tag_id;
-        let mut modified_node = node;
+        let mut modified_node = self.stack.take_retired();
         modified_node.child_text_node_index = 1;
         let text_depth = node_depth + 1;
         self.stack.push(modified_node);
         // Emit synthetic text
         self.emit_text(&prefix, false, text_depth, 0);
-        for prev in &mut self.stack {
+        for prev in self.stack.iter_mut() {
           prev.child_text_node_index += 1;
         }
         let Some(modified_node2) = self.stack.pop() else {
@@ -1496,7 +1494,8 @@ impl ConvertState {
         };
         // Emit exit
         self.emit_exit_element(&modified_node2);
-        self.recycle_node(modified_node2);
+        self.stack.restore_retired(modified_node2);
+        self.stack.release_retired();
         if let Some(id) = node_tag_id {
           debug_assert!(
             (id as usize) < MAX_TAG_ID,
@@ -1524,11 +1523,10 @@ impl ConvertState {
       }
     }
 
-    // Inline emit exit (no callback!)
+    let node = self.stack.take_retired();
     self.emit_exit_element(&node);
-
-    let node_tag_id = node.tag_id;
-    self.recycle_node(node);
+    self.stack.restore_retired(node);
+    self.stack.release_retired();
 
     if let Some(id) = node_tag_id {
       debug_assert!(
@@ -1835,15 +1833,6 @@ impl ConvertState {
     if !result.self_closing {
       self.close_node();
     }
-  }
-
-  /// Recycle a node into the pool. `clear` keeps the `Attributes` capacity,
-  /// which `process_opening_tag` swaps back out into `attr_scratch`.
-  #[inline]
-  pub(crate) fn recycle_node(&mut self, mut node: ElementNode) {
-    node.attributes.clear();
-    node.extras = None;
-    self.node_pool.push(node);
   }
 
   #[inline]

@@ -1,13 +1,12 @@
 //! Low-level HTML scanning primitives: whitespace, comments, tag attributes.
 
 use crate::consts::*;
-use crate::entities::decode_html_attribute_entities;
 use crate::types::Attributes;
 
 /// Whitespace check optimized for the hot character loop.
 /// Uses a 33-bit bitmap: space(32), CR(13), LF(10), TAB(9).
 #[inline(always)]
-pub(crate) fn is_whitespace(c: u8) -> bool {
+pub(crate) const fn is_whitespace(c: u8) -> bool {
   if c > 32 {
     return false;
   }
@@ -271,10 +270,8 @@ pub(crate) fn tag_is_complete(
   None
 }
 
-/// Bytes a start tag may retain: its own name when that is kept, plus the
-/// attribute names and values its mask keeps, measured against
-/// `max_node_bytes`. Attributes the mask rejects are never charged, so a
-/// megabyte of `data-*` costs nothing and its element survives.
+/// Bytes a start tag may retain, counted against `max_node_bytes`. Attributes
+/// the mask rejects are not charged.
 #[derive(Clone, Copy)]
 pub(crate) struct AttrBudget {
   cap: usize,
@@ -494,11 +491,7 @@ fn push_attr(
     return;
   }
   // A known name is fully described by `bit`; only the `ATTR_ALL` long tail
-  // needs an owned, lowercased copy.
-  let value = match value {
-    Some(value) => decode_html_attribute_entities(value).into_owned(),
-    None => String::new(),
-  };
+  // needs an owned, lowercased copy. Values decode into a recycled buffer.
   if bit == ATTR_NONE {
     result.insert_custom(raw.to_ascii_lowercase().into_boxed_str(), value);
   } else {

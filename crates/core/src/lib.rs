@@ -58,15 +58,24 @@ pub fn html_to_text_result(html: &str, options: HtmlToMarkdownOptions) -> Mdream
   html_to_format_result(html, options, OutputFormat::Text)
 }
 
+/// Input bytes per reserved output byte for a one-shot conversion.
+const OUTPUT_RESERVE_DIVISOR: usize = 8;
+const MIN_ONE_SHOT_CAPACITY: usize = 1024;
+const MAX_ONE_SHOT_CAPACITY: usize = 256 * 1024;
+
 /// Convert HTML to the requested format with full results (extraction, frontmatter).
 pub fn html_to_format_result(
   html: &str,
   options: HtmlToMarkdownOptions,
   format: OutputFormat,
 ) -> MdreamResult {
-  let capacity = (html.len() / 3).clamp(1024, 256 * 1024);
-  let state = ConvertState::new(options, capacity, format);
+  let state = ConvertState::new(options, one_shot_capacity(html.len()), format);
   convert_with_state(html, state)
+}
+
+/// Reserve low: output runs from a tenth of the input to over half.
+fn one_shot_capacity(html_len: usize) -> usize {
+  (html_len / OUTPUT_RESERVE_DIVISOR).clamp(MIN_ONE_SHOT_CAPACITY, MAX_ONE_SHOT_CAPACITY)
 }
 
 // The fuzz oracle uses the same renderer, with size-driven text flushes disabled.
@@ -123,7 +132,7 @@ impl MarkdownStreamProcessor {
 
   /// Create a streaming converter for the requested output format.
   pub fn new_with_format(options: HtmlToMarkdownOptions, format: OutputFormat) -> Self {
-    let mut state = ConvertState::new(options, 4096, format);
+    let mut state = ConvertState::new(options, convert::STREAM_BUFFER_CAPACITY, format);
     // One-shot conversion does not pay for link hold bookkeeping.
     state.streaming = true;
     Self {
@@ -150,6 +159,7 @@ impl MarkdownStreamProcessor {
       // terminator in place, rather than recopying it every chunk.
       let consumed = self.state.process_html(&self.buffer);
       self.buffer.drain(..consumed);
+      convert::release_stream_slack(&mut self.buffer);
     }
     self.state.get_markdown_chunk()
   }

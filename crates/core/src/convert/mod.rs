@@ -84,6 +84,23 @@ const BATCHABLE_TEXT: [bool; 256] = {
   t
 };
 
+/// Typical element nesting depth; the open-element stack starts this deep.
+const TYPICAL_NESTING_DEPTH: usize = 8;
+
+pub(crate) const STREAM_BUFFER_CAPACITY: usize = 1024;
+
+/// Shrink past `SLACK_TRIGGER` times the live bytes, down to `SLACK_KEEP` times.
+const SLACK_TRIGGER: usize = 4;
+const SLACK_KEEP: usize = 2;
+
+#[inline]
+pub(crate) fn release_stream_slack(buffer: &mut String) {
+  let len = buffer.len();
+  if buffer.capacity() / SLACK_TRIGGER > len {
+    buffer.shrink_to(STREAM_BUFFER_CAPACITY.max(SLACK_KEEP * len));
+  }
+}
+
 /// A text run this long is emitted in pieces of the same source node, so one
 /// enormous run streams in a window instead of being held whole.
 const TEXT_RUN_FLUSH_THRESHOLD: usize = 64 * 1024;
@@ -691,9 +708,7 @@ pub struct ConvertState {
   pending_tag: Option<PendingTagScan>,
   discard: Discard,
   script_text_buffer: String,
-  pub stack: Vec<ElementNode>,
-  node_pool: Vec<ElementNode>,
-  /// Scan target, swapped with the pooled node so attribute buffers recycle.
+  pub(crate) stack: crate::types::NodeStack,
   pub(crate) attr_scratch: crate::types::Attributes,
 
   // Plugin flags
@@ -1032,8 +1047,7 @@ impl ConvertState {
       pending_tag: None,
       discard: Discard::No,
       script_text_buffer: String::new(),
-      stack: Vec::with_capacity(32),
-      node_pool: Vec::with_capacity(32),
+      stack: crate::types::NodeStack::with_capacity(TYPICAL_NESTING_DEPTH),
       attr_scratch: crate::types::Attributes::new(),
 
       has_plugins: false,
@@ -2951,6 +2965,7 @@ impl ConvertState {
     self.cut_line_lead = Self::classify_cut_line(bytes, drain_end, self.cut_line_lead);
     self.note_link_release(drain_end);
     self.buffer.drain(..drain_end);
+    release_stream_slack(&mut self.buffer);
     self.note_buffer_drain(drain_end);
     self.last_yielded_length -= drain_end;
     self.link.bracket_pos = self.link.bracket_pos.saturating_sub(drain_end);
