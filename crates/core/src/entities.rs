@@ -126,9 +126,7 @@ pub(crate) fn decode_html_entities_into(
 
   while i < len {
     if bytes[i] != b'&' {
-      while i < len && bytes[i] != b'&' {
-        i += 1;
-      }
+      i = crate::scan::find_byte(&bytes[i..], b'&').map_or(len, |p| i + p);
       continue;
     }
 

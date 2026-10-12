@@ -1174,10 +1174,13 @@ impl ConvertState {
           skip_node = true;
           filter_excluded = true;
         } else if is_hidden(&tag)
-          || self
-            .filter_exclude_parsed
-            .iter()
-            .any(|(_, parsed)| matches_selector_list(&tag, parsed))
+          || match (&self.filter_exclude_tags, tag.tag_id) {
+            (Some(table), Some(id)) if tag.custom_name().is_none() => table >> id & 1 == 1,
+            _ => self
+              .filter_exclude_parsed
+              .iter()
+              .any(|(_, parsed)| matches_selector_list(&tag, parsed)),
+          }
         {
           skip_node = true;
           filter_excluded = true;
@@ -1583,7 +1586,14 @@ impl ConvertState {
     let mut tag_name_end = chunk_length;
     let mut quote = 0;
     let mut found_close = false;
-    while i < chunk_length {
+    // Fast path for `</name>`; anything else takes the full tokenizer loop.
+    let name_end = crate::scan::tag_name_end(bytes, i);
+    if name_end < chunk_length && bytes[name_end] == GT_CHAR {
+      tag_name_end = name_end;
+      i = name_end;
+      found_close = true;
+    }
+    while !found_close && i < chunk_length {
       let c = bytes[i];
       if tag_name_end == chunk_length && (is_whitespace(c) || c == SLASH_CHAR || c == GT_CHAR) {
         tag_name_end = i;
