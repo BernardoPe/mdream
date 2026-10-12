@@ -337,6 +337,11 @@ impl NodeStack {
     &self.nodes[self.len]
   }
 
+  #[inline(always)]
+  pub fn retired_mut(&mut self) -> &mut ElementNode {
+    &mut self.nodes[self.len]
+  }
+
   /// Drop a retired node's large values and extras once its exit is emitted.
   /// Otherwise a slot above the live depth holds them until the document ends.
   #[inline]

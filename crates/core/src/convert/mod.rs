@@ -657,6 +657,8 @@ fn find_script_end_tag(bytes: &[u8], start: usize, initial_state: u8) -> ScriptS
 pub struct ConvertState {
   // === Parser state ===
   pub depth_map: [u16; MAX_TAG_ID],
+  /// Cached [`Self::in_raw_html_block`].
+  raw_html_block_open: bool,
   pub depth: usize,
   has_encoded_html_entity: bool,
   last_char_was_whitespace: bool,
@@ -874,6 +876,8 @@ pub struct ConvertState {
   /// a flush, which can run once per 8KB and once per open frame, reuses the
   /// capacity instead of allocating a fresh copy of the region each time.
   blockquote_scratch: String,
+  /// Scratch for a text node's escaped copy.
+  pub(crate) escape_scratch: String,
   /// Completed-line lookup through the settled prefix. Appending a long line
   /// must not search every preceding byte again after each input chunk.
   blockquote_line_scanned_to: usize,
@@ -938,6 +942,9 @@ pub struct ConvertState {
   cut_line_lead: CutLineLead,
   #[cfg(test)]
   gfm_escape_slow_path_calls: usize,
+  /// Test/fuzz switch: `false` routes everything through the general path.
+  #[cfg(any(test, fuzzing))]
+  pub(crate) fast_paths: bool,
   /// Bytes a table row read back to classify the line it follows.
   #[cfg(test)]
   row_line_scanned: std::cell::Cell<usize>,
@@ -1010,6 +1017,7 @@ impl ConvertState {
     let options_max_node_bytes = options.max_node_bytes;
     let mut s = Self {
       depth_map: [0; MAX_TAG_ID],
+      raw_html_block_open: false,
       depth: 0,
       has_encoded_html_entity: false,
       last_char_was_whitespace: true,
@@ -1142,6 +1150,7 @@ impl ConvertState {
       code_fence: None,
       blockquotes: Vec::with_capacity(4),
       blockquote_scratch: String::new(),
+      escape_scratch: String::new(),
       blockquote_line_scanned_to: 0,
       blockquote_line_end: 0,
       heading_slugs: Vec::new(),
@@ -1166,6 +1175,8 @@ impl ConvertState {
       hard_break_end: usize::MAX,
       #[cfg(test)]
       gfm_escape_slow_path_calls: 0,
+      #[cfg(any(test, fuzzing))]
+      fast_paths: true,
       #[cfg(test)]
       row_line_scanned: std::cell::Cell::new(0),
       #[cfg(test)]
@@ -1574,9 +1585,8 @@ impl ConvertState {
         && cc != LT_CHAR
         && (self.text_node_exhausted || text_buffer.len() >= max_node_bytes)
       {
-        while i < chunk_length && bytes[i] != LT_CHAR {
-          i += 1;
-        }
+        i =
+          crate::scan::find_byte(&bytes[i..chunk_length], LT_CHAR).map_or(chunk_length, |p| i + p);
         self.text_node_exhausted = true;
         self.truncated = true;
         continue;
@@ -1585,7 +1595,11 @@ impl ConvertState {
       if cc != LT_CHAR {
         // Batch contiguous plain ASCII text, absorbing single inter-word
         // spaces so prose is copied once per text node, not per word.
-        if BATCHABLE_TEXT[cc as usize] && !self.in_non_nesting && !self.in_pre {
+        // Uncapped `<pre>` text batches too; under a cap the per-byte path must see each byte.
+        if BATCHABLE_TEXT[cc as usize]
+          && !self.in_non_nesting
+          && (!self.in_pre || max_node_bytes == 0)
+        {
           let start = i;
           let limit = chunk_length.min(i + self.text_run_room(&text_buffer));
           i += 1;
@@ -1610,7 +1624,9 @@ impl ConvertState {
             max_node_bytes,
             &mut self.text_node_exhausted,
           );
-          self.text_buffer_batchable_len += text_buffer.len() - before_len;
+          if !self.in_pre {
+            self.text_buffer_batchable_len += text_buffer.len() - before_len;
+          }
           self.text_buffer_contains_non_whitespace = true;
           if had_space {
             self.text_buffer_contains_whitespace = true;
@@ -3336,7 +3352,7 @@ mod tests {
       match seed % 5 {
         0 | 1 => state
           .buffer
-          .push([b'#', b' ', b'\t', b'x'][(seed as usize >> 8) % 4] as char),
+          .push(b"# \tx"[(seed as usize >> 8) % 4] as char),
         2 if !state.buffer.is_empty() => {
           let at = (seed as usize >> 8) % state.buffer.len();
           state.note_buffer_rewrite(at);

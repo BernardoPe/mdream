@@ -15,6 +15,35 @@ pub(crate) const fn is_whitespace(c: u8) -> bool {
   (MASK >> c) & 1 == 1
 }
 
+const SWAR_WIDTH: usize = 8;
+
+/// The lowest set bit of the zero-byte test is exact: borrows run upward only.
+// One out-of-line copy in WASM, where each inlined loop costs bundle bytes.
+#[cfg_attr(target_arch = "wasm32", inline(never))]
+#[cfg_attr(not(target_arch = "wasm32"), inline)]
+pub(crate) fn find_byte(hay: &[u8], needle: u8) -> Option<usize> {
+  const BYTE_ONES: u64 = 0x0101_0101_0101_0101;
+  const HIGH_BITS: u64 = 0x8080_8080_8080_8080;
+  let pattern = BYTE_ONES * u64::from(needle);
+  let mut chunks = hay.chunks_exact(SWAR_WIDTH);
+  let mut offset = 0usize;
+  for chunk in &mut chunks {
+    let word = u64::from_le_bytes([
+      chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+    ]) ^ pattern;
+    let hits = word.wrapping_sub(BYTE_ONES) & !word & HIGH_BITS;
+    if hits != 0 {
+      return Some(offset + (hits.trailing_zeros() / u8::BITS) as usize);
+    }
+    offset += SWAR_WIDTH;
+  }
+  chunks
+    .remainder()
+    .iter()
+    .position(|&b| b == needle)
+    .map(|p| offset + p)
+}
+
 pub(crate) struct CommentResult {
   pub(crate) complete: bool,
   pub(crate) new_position: usize,
