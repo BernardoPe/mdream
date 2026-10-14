@@ -1,7 +1,7 @@
 {
   "name": "@mdream/nuxt",
   "type": "module",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Nuxt module for converting HTML pages to Markdown using mdream",
   "contributors": [
     {
@@ -52,7 +52,6 @@
     "dev:build": "nuxi build playground",
     "dev:prepare": "nuxt-module-build build --stub && nuxt-module-build prepare && nuxi prepare playground",
     "prepare:fixtures": "nuxi prepare test/fixtures/basic",
-    "release": "pnpm build && bumpp && pnpm -r publish",
     "test": "pnpm prepare:fixtures && vitest run",
     "test:watch": "vitest watch",
     "test:attw": "echo 'ok'",
@@ -84,6 +83,7 @@
     "jsdom": "catalog:",
     "nuxt": "catalog:",
     "typescript": "catalog:",
+    "vitest": "catalog:",
     "vue": "catalog:",
     "vue-tsc": "catalog:"
   }
